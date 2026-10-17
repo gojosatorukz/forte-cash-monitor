@@ -1,0 +1,33 @@
+# Cloudflare quick tunnel for forte-service (production path: no domain needed). Install: README, "systemd".
+# Deliberately independent of forte-service (no PartOf=/BindsTo=): restarting the app never rotates the URL.
+# WARNING: every (re)start of THIS unit - including a reboot - gets a NEW random https://*.trycloudflare.com URL.
+# Current URL: cat <DATA_DIR>/public_url.txt, GET /healthz -> "public_url", or scripts/public_url.sh.
+# Edit User=, Group=, WorkingDirectory=, EnvironmentFile=, ExecStart*=, ExecStopPost= and PATH below.
+# The log fallback in public_url.sh reads journald as User=: that user must be in group adm or systemd-journal.
+[Unit]
+Description=Cloudflare quick tunnel for forte-service
+Wants=network-online.target
+After=network-online.target forte-service.service
+
+[Service]
+Type=simple
+User=forte
+Group=forte
+WorkingDirectory=/home/forte/forte-service
+# Same .env as the app: PORT (default 8000) and DATA_DIR (where public_url.txt is written).
+EnvironmentFile=-/home/forte/forte-service/.env
+Environment=TUNNEL_METRICS=127.0.0.1:20241
+# cloudflared from ~/.local/bin (scripts/setup.sh --with-cloudflared) or /usr/bin (apt).
+Environment=PATH=/home/forte/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/forte/forte-service/scripts/tunnel.sh
+# Waits up to 60 s for the new hostname and writes it to DATA_DIR/public_url.txt; '-' = never fail the unit.
+ExecStartPost=-/usr/bin/env WAIT_SEC=60 /home/forte/forte-service/scripts/public_url.sh
+TimeoutStartSec=90
+# The URL dies with this process: remove it on every stop/restart so /healthz never reports a dead URL.
+# Edit the path if DATA_DIR / PUBLIC_URL_FILE in .env point elsewhere. '-' = never fail the unit.
+ExecStopPost=-/bin/rm -f /home/forte/forte-service/data/public_url.txt
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+<section id="results" data-transition="fade" style="background:#F7F5F0;color:#14213D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:56px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#B4581A;letter-spacing:2px">РЕЗУЛЬТАТЫ · 42 ОТКРЫТЫХ ВИДЕО</p>
+<h2 style="font-family:'PT Serif', Georgia, serif;font-size:72px;font-weight:700;line-height:1.1">Пропуск недопустим, лишнюю проверку отсечёт человек</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:40px;border:1px solid #DCD8CE;border-radius:16px">
+<p style="font-family:'PT Serif', Georgia, serif;font-size:96px;font-weight:700;color:#B4581A">[__%]</p>
+<p style="font-size:28px;color:#3D4A63">полнота по видео с нарушениями</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:40px;border:1px solid #DCD8CE;border-radius:16px">
+<p style="font-family:'PT Serif', Georgia, serif;font-size:96px;font-weight:700;color:#14213D">[__/20]</p>
+<p style="font-size:28px;color:#3D4A63">ложных срабатываний на чистых видео (цель ≤ 6)</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:40px;border:1px solid #DCD8CE;border-radius:16px">
+<p style="font-family:'PT Serif', Georgia, serif;font-size:96px;font-weight:700;color:#14213D">[__%]</p>
+<p style="font-size:28px;color:#3D4A63">таймкод в пределах ±5 с</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:40px;border:1px solid #DCD8CE;border-radius:16px">
+<p style="font-family:'PT Serif', Georgia, serif;font-size:96px;font-weight:700;color:#14213D">≈28 с</p>
+<p style="font-size:28px;color:#3D4A63">на самое длинное видео (142 с), включая загрузку; лимит 300 с</p>
+<p style="font-size:20px;color:#6A7183">замер на целевой машине: RTX 5080, через публичный URL</p>
+</div>
+</div>
+<p style="font-size:30px;line-height:1.4;color:#3D4A63">Устойчивость: зеркало, поворот, кроп, затемнение, собственные съёмки с других ракурсов — [TODO].</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;color:#6A7183">Источник: инструмент оценки детектора, docs/status_detector.md. Базовая линия «всегда нарушение»: точность 52%.</p>
+<aside>3:35–4:20. Числа берутся ТОЛЬКО из итоговых status_detector.md / status_robust.md (с перекрёстной проверкой); предварительные не ставить и не озвучивать. Время ≈28 с — замер X-14 на RTX 5080 через https://forte.incode.kz (28,2 с, из них 8,3 с загрузка); перемерить после финального деплоя детектора, обновить при изменении >20%. Ключевая фраза: «Организаторы сказали прямо: пропуск недопустим, ложное срабатывание допустимо — его отсечёт проверяющий. Мы настроили систему именно так.»</aside>
+</section>

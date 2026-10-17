@@ -1,0 +1,24 @@
+{
+  "version": "2026-10-17.1",
+  "source": "docs/deliverables/03_normativnye_istochniki.md; quotes verbatim from docs/regulations.md (adilet.zan.kz / mirror zakon.uchet.kz)",
+  "placeholders": "{t} = timecode mm:ss of the event; {obs} = optional short observed-fact phrase from the detector (may be empty)",
+  "legal_conf": "high | medium | low — strength of the link between the observed fact and the cited norm (separate from detection confidence)",
+  "docs": {
+    "S1": {
+      "document": "Правила осуществления кассовых операций и операций по инкассации банкнот, монет и ценностей (Постановление Правления НБРК № 231 от 29.11.2019)",
+      "url": "https://adilet.zan.kz/rus/docs/V1900019680"
+    },
+    "S2": {
+      "document": "Правила организации охраны и устройства помещений (Постановление Правления НБРК № 14 от 24.02.2020)",
+      "url": "https://adilet.zan.kz/rus/docs/V2000020075"
+    },
+    "S5": {
+      "document": "Требования к обеспечению информационной безопасности банков (Постановление Правления АРРФР № 53 от 03.04.2026)",
+      "url": "https://adilet.zan.kz/rus/docs/V2600038336"
+    },
+    "S4": {
+      "document": "Требования к организации антитеррористической защиты объектов, уязвимых в террористическом отношении (Постановление Правительства РК № 305 от 06.05.2021)",
+      "url": "https://adilet.zan.kz/rus/docs/P2100000305"
+    }
+  }
+}

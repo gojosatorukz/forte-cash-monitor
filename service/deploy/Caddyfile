@@ -1,0 +1,25 @@
+# Public HTTPS entry point (option A: the PC has a public IP, A record -> it, router forwards 80/443).
+# Caddy obtains and renews the Let's Encrypt certificate for $PUBLIC_HOSTNAME automatically.
+#   Docker:      docker compose --profile caddy up -d caddy          (UPSTREAM defaults to app:8000)
+#   Bare metal:  /etc/caddy/Caddyfile + Environment=PUBLIC_HOSTNAME=... UPSTREAM=localhost:8000 (see README)
+{$PUBLIC_HOSTNAME} {
+	# Upload cap above the app's own 200 MB limit, so oversize files get the app's JSON 413.
+	request_body {
+		max_size 250MB
+	}
+	# Request bodies are streamed to the upstream (no request_buffers), responses flushed immediately.
+	reverse_proxy {$UPSTREAM:app:8000} {
+		flush_interval -1
+		transport http {
+			dial_timeout 10s
+			read_timeout 10m
+			write_timeout 10m
+			# Idle upstream connections closed after 60 s, before uvicorn's 75 s (--timeout-keep-alive),
+			# so Caddy never reuses a connection the app is closing.
+			keepalive 60s
+		}
+	}
+	log {
+		output stdout
+	}
+}

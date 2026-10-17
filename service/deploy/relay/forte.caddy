@@ -1,0 +1,35 @@
+# Team server (89.126.193.108), Caddy variant: public https://forte.incode.kz -> 5080 PC.
+# Drop-in site file; the existing incode.kz sites are not touched. Install (README, "Релей"):
+#   sudo mkdir -p /etc/caddy/sites && sudo cp forte.caddy /etc/caddy/sites/forte.caddy
+#   The main /etc/caddy/Caddyfile must import it. If it has no such line yet, append ONE line at the end:
+#     import sites/*.caddy
+#   If the main Caddyfile is a single site written WITHOUT braces (e.g. "incode.kz" on the first line, then
+#   directives), wrap that site in { } first - otherwise the import line becomes part of that site.
+#   Always validate before reloading (a failed reload keeps the old config, but do not rely on it):
+#   sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && sudo systemctl reload caddy
+#
+# Upstream: the autossh reverse tunnel from the PC listens on the server's 127.0.0.1:18000 (default).
+# NetBird variant: FORTE_UPSTREAM=<netbird-ip-of-the-pc>:8000 in Caddy's environment (systemctl edit caddy).
+# (FORTE_UPSTREAM, not UPSTREAM: this Caddy serves other sites too, so the variable name is namespaced.)
+# Caddy in Docker with bridge networking: 127.0.0.1 is the container itself - use network_mode: host for that
+# container, or the NetBird address.
+forte.incode.kz {
+	# Upload cap above the app's own 200 MB limit, so oversize files get the app's JSON 413.
+	request_body {
+		max_size 250MB
+	}
+	# Request bodies stream to the upstream (no request_buffers); responses are flushed immediately.
+	reverse_proxy {$FORTE_UPSTREAM:127.0.0.1:18000} {
+		flush_interval -1
+		transport http {
+			dial_timeout 10s
+			read_timeout 10m
+			write_timeout 10m
+			# Idle upstream connections closed after 60 s, before uvicorn's 75 s (--timeout-keep-alive),
+			# so Caddy never reuses a connection the app is closing.
+			keepalive 60s
+		}
+	}
+	# Access log to Caddy's default output (journalctl -u caddy); no file path that might not exist.
+	log
+}

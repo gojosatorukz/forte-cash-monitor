@@ -1,0 +1,43 @@
+[project]
+name = "forte-cashroom-service"
+version = "0.1.0"
+description = "ForteBank cash-room video violation detection service"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "opencv-python-headless",
+    "numpy",
+    "pydantic>=2",
+    "forte-detector",
+    "pillow>=13.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "httpx",
+]
+
+[tool.uv]
+package = false
+# supervision (via forte-detector) pulls GUI opencv-python, which clashes with the headless build
+# (same cv2 module) -> drop it, as in ../detector/pyproject.toml.
+override-dependencies = ["opencv-python; sys_platform == 'never'"]
+
+# PyTorch CUDA 12.8 wheels (needed for RTX 50xx / Blackwell sm_120: torch>=2.7 built with CUDA>=12.8).
+# torch/torchvision come in via forte-detector and resolve from this index.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
+forte-detector = { path = "../detector", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

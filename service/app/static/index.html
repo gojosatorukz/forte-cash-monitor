@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Контроль кассовой дисциплины</title>
+  <meta name="description" content="Анализ видеозаписей кассового помещения">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237B1E3A'/%3E%3Cpath d='M9 22V10h14' stroke='white' stroke-width='3' fill='none' stroke-linecap='round'/%3E%3Ccircle cx='20' cy='19' r='3.2' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Перейти к содержимому</a>
+
+  <header class="topbar">
+    <div class="topbar__inner">
+      <a class="brand" href="#" id="brand-link" aria-label="На главную">
+        <svg class="brand__mark" viewBox="0 0 40 40" aria-hidden="true">
+          <rect width="40" height="40" rx="9" fill="currentColor"/>
+          <path d="M11 28V12h18" stroke="#fff" stroke-width="3.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M17 18h8" stroke="#fff" stroke-width="3.4" stroke-linecap="round" opacity=".55"/>
+          <circle cx="25.5" cy="25" r="4" fill="#fff"/>
+        </svg>
+        <span class="brand__text">
+          <span class="brand__title">Контроль кассовой дисциплины</span>
+          <span class="brand__subtitle">Анализ видеозаписей кассового помещения</span>
+        </span>
+      </a>
+      <nav class="topbar__nav" aria-label="Разделы">
+        <a class="navlink" href="#history-section">История проверок</a>
+        <button type="button" class="btn btn--ghost-light" id="rules-open">
+          <svg viewBox="0 0 20 20" aria-hidden="true" class="icon"><path d="M4 3.5h9l3 3V16.5H4z M13 3.5v3h3 M7 9.5h6 M7 12.5h6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+          <span class="btn-label">Нормативная база</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main" class="container">
+    <!-- Upload -->
+    <section class="card upload-card" id="upload-section" aria-labelledby="upload-title">
+      <div class="card__head">
+        <div>
+          <h1 class="card__title" id="upload-title">Новая проверка</h1>
+          <p class="card__hint">Загрузите видеозапись с камеры кассового помещения. Система проверит соблюдение регламента и сформирует отчёт с доказательствами.</p>
+        </div>
+      </div>
+
+      <form id="upload-form" novalidate>
+        <label class="dropzone" id="dropzone" for="file-input">
+          <input type="file" id="file-input" name="file" accept=".mov,.mp4,video/quicktime,video/mp4" class="visually-hidden">
+          <svg class="dropzone__icon" viewBox="0 0 48 48" aria-hidden="true">
+            <rect x="6" y="11" width="28" height="26" rx="4" fill="none" stroke="currentColor" stroke-width="2.4"/>
+            <path d="M34 20l8-5v18l-8-5z" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/>
+            <path d="M20 30v-11m-4.5 4.5L20 19l4.5 4.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="dropzone__primary">Перетащите видеофайл сюда или <span class="dropzone__link">выберите на компьютере</span></span>
+          <span class="dropzone__secondary">Форматы .mov и .mp4, до 200 МБ</span>
+        </label>
+
+        <div class="file-row" id="file-row" hidden>
+          <svg viewBox="0 0 24 24" class="file-row__icon" aria-hidden="true"><rect x="3" y="5" width="13" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M16 10l5-3v10l-5-3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+          <div class="file-row__meta">
+            <div class="file-row__name" id="file-name"></div>
+            <div class="file-row__size" id="file-size"></div>
+          </div>
+          <button type="button" class="btn btn--text" id="file-clear">Убрать</button>
+        </div>
+
+        <p class="form-error" id="upload-error" role="alert" hidden></p>
+
+        <div class="form-actions">
+          <button type="submit" class="btn btn--primary" id="submit-btn" disabled>
+            <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M4.5 10.5l3.5 3.5 7.5-8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Проверить
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Progress -->
+    <section class="card progress-card" id="progress-section" aria-live="polite" hidden>
+      <div class="progress-card__row">
+        <div class="spinner" aria-hidden="true"></div>
+        <div class="progress-card__body">
+          <div class="progress-card__title" id="progress-title">Загрузка видео…</div>
+          <div class="progress-card__stage" id="progress-stage"></div>
+        </div>
+        <div class="progress-card__stats">
+          <div class="progress-card__pct" id="progress-pct">0%</div>
+          <div class="progress-card__elapsed">Прошло: <span id="progress-elapsed">0:00</span></div>
+        </div>
+      </div>
+      <div class="bar" role="progressbar" aria-labelledby="progress-title" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress-bar">
+        <div class="bar__fill" id="progress-fill"></div>
+      </div>
+      <div class="steps" aria-hidden="true">
+        <span class="step" id="step-upload">1. Загрузка</span>
+        <span class="step" id="step-analyze">2. Анализ</span>
+        <span class="step" id="step-report">3. Отчёт</span>
+      </div>
+    </section>
+
+    <!-- Failed -->
+    <section class="card error-card" id="error-section" role="alert" hidden>
+      <svg viewBox="0 0 24 24" class="error-card__icon" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v6m0 3.5v.5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+      <div class="error-card__body">
+        <h2 class="error-card__title">Не удалось выполнить проверку</h2>
+        <p class="error-card__text" id="error-text"></p>
+        <div class="error-card__actions">
+          <button type="button" class="btn btn--primary" id="retry-btn">Повторить</button>
+          <button type="button" class="btn btn--secondary" id="new-check-btn-err">Новая проверка</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Result -->
+    <section id="result-section" class="result" hidden aria-labelledby="verdict-title">
+      <div class="verdict" id="verdict">
+        <div class="verdict__icon" id="verdict-icon" aria-hidden="true"></div>
+        <div class="verdict__body">
+          <h2 class="verdict__title" id="verdict-title"></h2>
+          <div class="verdict__meta" id="verdict-meta"></div>
+        </div>
+        <div class="verdict__actions">
+          <button type="button" class="btn btn--secondary btn--sm" id="copy-link-btn">Скопировать ссылку</button>
+          <button type="button" class="btn btn--secondary btn--sm" id="new-check-btn">Новая проверка</button>
+        </div>
+      </div>
+      <div class="notice notice--warn" id="partial-note" hidden>
+        <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M10 2.5l8 14H2z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M10 8v4m0 2.2v.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <span>Анализ остановлен по лимиту времени — результат может быть неполным. Показаны нарушения, обнаруженные до остановки.</span>
+      </div>
+      <div class="notice notice--warn notice--list" id="warnings-note" role="note" aria-labelledby="warnings-title" hidden>
+        <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M10 2.5l8 14H2z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M10 8v4m0 2.2v.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <div>
+          <strong class="notice__title" id="warnings-title">Предупреждения</strong>
+          <ul class="notice__items" id="warnings-list"></ul>
+        </div>
+      </div>
+
+      <div class="result__grid">
+        <div class="player card">
+          <div class="player__frame">
+            <video id="video" controls preload="metadata" playsinline></video>
+          </div>
+          <div class="timeline-wrap">
+            <div class="timeline" id="timeline" aria-label="Шкала времени с отметками нарушений">
+              <div class="timeline__played" id="timeline-played"></div>
+              <div class="timeline__markers" id="timeline-markers"></div>
+              <div class="timeline__head" id="timeline-head"></div>
+            </div>
+            <div class="timeline__labels"><span id="tl-start">0:00</span><span id="tl-end">—</span></div>
+          </div>
+          <dl class="meta-list" id="video-meta"></dl>
+        </div>
+
+        <div class="violations">
+          <div class="violations__head">
+            <h3 class="section-title" id="violations-title">Выявленные нарушения</h3>
+          </div>
+          <div id="violations-list" class="violations__list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- History -->
+    <section class="card history" id="history-section" aria-labelledby="history-title">
+      <div class="card__head card__head--row">
+        <h2 class="card__title" id="history-title">История проверок</h2>
+        <button type="button" class="btn btn--text" id="history-refresh">
+          <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M16 10a6 6 0 1 1-1.8-4.3M16 3.5v3h-3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Обновить
+        </button>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="history-table">
+          <thead>
+            <tr>
+              <th scope="col">Дата и время</th>
+              <th scope="col">Файл</th>
+              <th scope="col" class="col-hide-sm">Статус</th>
+              <th scope="col">Результат</th>
+              <th scope="col" class="num col-hide-sm">Нарушений</th>
+            </tr>
+          </thead>
+          <tbody id="history-body"></tbody>
+        </table>
+      </div>
+      <p class="empty" id="history-empty" hidden>Проверок пока нет. Загрузите первое видео, чтобы начать.</p>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="footer__inner">
+      <span class="footer__lock">
+        <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><rect x="4" y="9" width="12" height="8.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 9V6.5a3 3 0 0 1 6 0V9" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+        Все вычисления выполняются локально. Распознавание лиц не используется.
+      </span>
+      <span class="footer__muted">Для внутреннего использования</span>
+    </div>
+  </footer>
+
+  <!-- Rules modal -->
+  <dialog class="modal" id="rules-modal" aria-labelledby="rules-title">
+    <div class="modal__head">
+      <h2 class="modal__title" id="rules-title">Нормативная база</h2>
+      <button type="button" class="icon-btn" data-close aria-label="Закрыть">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="modal__body" id="rules-body">
+      <p class="empty">Загрузка…</p>
+    </div>
+  </dialog>
+
+  <!-- Lightbox -->
+  <dialog class="lightbox" id="lightbox" aria-label="Кадр-доказательство">
+    <figure class="lightbox__figure">
+      <img id="lightbox-img" alt="">
+      <figcaption class="lightbox__caption">
+        <span id="lightbox-caption"></span>
+        <span class="lightbox__actions">
+          <button type="button" class="btn btn--ghost-light btn--sm" id="lightbox-prev" aria-label="Предыдущий кадр">‹</button>
+          <button type="button" class="btn btn--ghost-light btn--sm" id="lightbox-seek">Перейти к моменту</button>
+          <button type="button" class="btn btn--ghost-light btn--sm" id="lightbox-next" aria-label="Следующий кадр">›</button>
+        </span>
+      </figcaption>
+    </figure>
+    <button type="button" class="icon-btn lightbox__close" data-close aria-label="Закрыть">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    </button>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+You are ROBUSTNESS lead for our ForteBank Datathon 26 team. The orchestrator is the Claude session named `datathon2026-4f` — report milestones and questions to it with SendMessage (find it via ListAgents); the human user is also watching this terminal. You may dispatch subagents; they must not spawn further subagents.
+
+Context: read docs/00_case_brief.md and docs/01_findings.md. The final jury video is shot from a DIFFERENT CAMERA ANGLE, and test videos may contain violation types not in training (10 pts robustness + detection on unseen videos). Training videos: ~/Downloads/Datathon26-20261017T071335Z-1-001/Datathon26/open/videos (portrait 464x848, 30 fps). Another session `forte-detector` builds the pipeline + eval harness in detector/ (see docs/status_detector.md) — coordinate with it via SendMessage, don't edit its code.
+
+Tasks:
+1. Build an augmented validation set in /home/datamata/Projects/datathon2026/robust/ (outside the repo trees of other sessions): per video, variants with horizontal flip, perspective warps simulating ±15–30° camera yaw/pitch, crops/zoom, rotation 90° (landscape), brightness/contrast/blur/JPEG-compression, lower fps. Keep labels (timestamps unchanged). Document the generator script.
+2. Make a recording guide for the human team: a shot list of ~10 short staged clips they can film themselves (phone overhead, different angle) covering T1–T14 incl. unseen-in-train types (phone in cash room T13, covered camera T14) + clean counterparts — FAQ #7 allows own footage. Write it to docs/recording_guide.md (Russian), concise and practical.
+3. When the detector's eval harness is usable, run it on the augmented set and write per-augmentation recall/FP to docs/status_robust.md; tell forte-detector and the orchestrator what breaks.
+Fully local; no cloud AI on the videos (data must stay within the hackathon).

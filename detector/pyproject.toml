@@ -1,0 +1,46 @@
+[project]
+name = "forte-detector"
+version = "0.1.0"
+description = "Local cash-room video violation detector (ForteBank Datathon 2026)"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy",
+    "opencv-python-headless",
+    "av",
+    "pillow",
+    "openpyxl",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "transformers==5.20.1",
+    "supervision==0.26.1",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "forte_detector"
+module-root = ""
+
+[tool.uv]
+# supervision 0.26 (last release with sv.ByteTrack) pulls GUI opencv-python, which clashes with the
+# headless build we use (same cv2 module) -> drop it.
+override-dependencies = ["opencv-python; sys_platform == 'never'"]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -1,0 +1,94 @@
+# docker compose up -d --build                  -> service on http://127.0.0.1:${PORT:-8000}/ (host loopback only;
+#                                                  BIND_ADDR=0.0.0.0 in .env for a LAN demo - Docker bypasses ufw)
+#                                                  (only changed services are recreated; a running tunnel is untouched)
+# After editing .env: docker compose up -d   (recreates what changed; `restart` does NOT re-read .env)
+# Public URL, pick ONE (see README, "Публичный адрес"):
+#   Relay (primary): no compose service. forte-relay.service (autossh) on the host forwards the team server's
+#                    127.0.0.1:18000 to 127.0.0.1:8000 here; PUBLIC_HOSTNAME=forte.incode.kz in .env
+#   A) docker compose --profile caddy up -d caddy     -> https://$PUBLIC_HOSTNAME (public IP, ports 80/443 forwarded)
+#   B) Tailscale Funnel on the host                    -> no compose service, set PUBLIC_HOSTNAME in .env
+#   C) docker compose --profile tunnel up -d           -> Cloudflare quick tunnel; NEW random URL on every tunnel
+#                                                        restart; tunnel-url writes it to data/public_url.txt
+# Before the first start: mkdir -p data models  (otherwise Docker creates them owned by root)
+services:
+  app:
+    build: .
+    image: forte-cashroom-service:latest
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATA_DIR: /app/data   # fixed inside the container; overrides any DATA_DIR from .env
+    volumes:
+      - ./data:/app/data
+      - ./models:/models
+    ports:
+      # Loopback by default: Docker's iptables rules bypass ufw, so 0.0.0.0 would expose the app to the whole LAN.
+      # The relay (autossh -> 127.0.0.1:8000), Funnel (localhost:8000) and Caddy/tunnel (app:8000 on the compose
+      # network) all work with this. LAN demo: BIND_ADDR=0.0.0.0 in .env, then docker compose up -d.
+      - "${BIND_ADDR:-127.0.0.1}:${PORT:-8000}:8000"
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # (A) HTTPS reverse proxy with automatic Let's Encrypt certificates.
+  caddy:
+    image: caddy:2
+    profiles: [caddy]
+    environment:
+      # Not ${PUBLIC_HOSTNAME:?...}: compose interpolates every service, profile or not, so that would break plain
+      # `docker compose up` for everyone without a hostname. The guard in `command` fails this container instead.
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:-}
+      UPSTREAM: app:8000
+    command:
+      - sh
+      - -c
+      - >-
+        if [ -z "$$PUBLIC_HOSTNAME" ]; then echo "error: set PUBLIC_HOSTNAME in .env, then docker compose --profile caddy up -d caddy" >&2; exit 1; fi;
+        exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # certificates: keep this volume, or Let's Encrypt rate limits may bite
+      - caddy_config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  # (C) Cloudflare quick tunnel. Separate service: `docker compose restart app` does not change its URL.
+  tunnel:
+    image: cloudflare/cloudflared:2026.10.1   # pinned: the version checked in Task 5 (--metrics, /quicktunnel)
+    profiles: [tunnel]
+    command: tunnel --no-autoupdate --metrics 0.0.0.0:20241 --url http://app:8000
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  # (C) Polls the tunnel's metrics (/quicktunnel) and writes https://<host> to data/public_url.txt (-> /healthz).
+  tunnel-url:
+    image: forte-cashroom-service:latest   # the app's image (built by the app service), never pulled
+    pull_policy: never
+    profiles: [tunnel]
+    command: ["scripts/public_url.sh", "--watch"]
+    environment:
+      TUNNEL_METRICS: tunnel:20241
+      DATA_DIR: /app/data
+    volumes:
+      - ./scripts:/app/scripts:ro
+      - ./data:/app/data
+    depends_on:
+      - tunnel
+    restart: unless-stopped
+
+  # (D) Named Cloudflare tunnel: dormant (needs the domain's DNS on Cloudflare). README has the commands.
+
+volumes:
+  caddy_data:
+  caddy_config:
