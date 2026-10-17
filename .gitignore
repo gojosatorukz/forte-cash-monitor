@@ -1,0 +1,54 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python and tooling
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Datasets, evidence, model weights, and runtime state stay on team hardware
+.runtime/
+data/
+datasets/
+open/
+analysis/
+output/
+tmp/
+uploads/
+frames/
+models/*
+!models/README.md
+*.mov
+*.mp4
+*.avi
+*.mkv
+*.zip
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.onnx
+*.mlmodel
+*.mlpackage/
+*.sqlite*
+*.db
+*.log
+
+# Editors / OS / frontend build
+.DS_Store
+.idea/
+.vscode/
+node_modules/
+frontend/dist/

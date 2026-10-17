@@ -1,0 +1,27 @@
+{
+  "version": "2026-10-17",
+  "status": "draft_not_connected_to_inference",
+  "jurisdiction": "KZ",
+  "rules": [
+    {
+      "id": "cash_previous_operation",
+      "category": "C2",
+      "document": "Постановление Правления НБРК от 29.11.2019 №231",
+      "paragraph": "20",
+      "url": "https://old.adilet.zan.kz/rus/docs/V1900019680",
+      "visible_conditions": ["previously_accepted_cash_tracked", "separate_next_customer_started", "previous_cash_not_stored"],
+      "exceptions_to_check": ["two_people_represent_one_customer", "object_is_not_cash", "cash_belongs_to_current_operation"],
+      "wording": "Видны признаки сохранения ранее принятой наличности на рабочей поверхности при следующей операции. Требуется проверка обстоятельств."
+    },
+    {
+      "id": "cash_left_after_departure",
+      "category": "C10",
+      "document": "Постановление Правления НБРК от 29.11.2019 №231",
+      "paragraph": "20",
+      "url": "https://old.adilet.zan.kz/rus/docs/V1900019680",
+      "visible_conditions": ["previously_accepted_cash_tracked", "cashier_departure_confirmed", "cash_remains_on_surface"],
+      "exceptions_to_check": ["temporary_occlusion_is_not_departure", "object_is_not_cash", "cash_operation_context_unknown"],
+      "wording": "После ухода кассира на рабочей поверхности остаётся прослеженная пачка. Применимость правила зависит от подтверждения ранее принятой наличности."
+    }
+  ]
+}

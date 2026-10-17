@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>API · Forte Cash Monitor</title><link rel="stylesheet" href="/static/app.css"></head>
+<body>
+<header><a class="brand" href="/">← Forte Cash Monitor</a><a href="/openapi.json">OpenAPI JSON ↗</a></header>
+<main class="api-page">
+  <div class="eyebrow">КОНТРАКТ DATATHON 26</div>
+  <h1>API сервиса</h1>
+  <div class="notice warning">Это рабочая основа. Пока локальная модель не подключена, загрузка возвращает 503, а не выдуманный результат анализа.</div>
+  <h2>Создать задачу</h2><p><code>POST /api/v1/analyze</code> · multipart-поле <code>file</code> · MOV · заголовок <code>X-API-Key</code>.</p>
+  <pre>curl -X POST http://127.0.0.1:8000/api/v1/analyze \
+  -H "X-API-Key: YOUR_LOCAL_KEY" \
+  -F "file=@/path/to/video.mov"</pre>
+  <p>После подключения модели: HTTP 202 и <code>{"job_id":"…"}</code>.</p>
+  <h2>Получить состояние</h2><pre>curl http://127.0.0.1:8000/api/v1/jobs/JOB_ID \
+  -H "X-API-Key: YOUR_LOCAL_KEY"</pre>
+  <p>Статусы: <code>processing</code>, <code>done</code>, <code>failed</code>. Только завершённый анализ возвращает <code>verdict</code> и <code>violations</code>.</p>
+  <h2>Готовность</h2><p><a href="/healthz">/healthz</a> — сервер запущен. <a href="/readyz">/readyz</a> — готов ли анализатор. HTTP 503 при неподключённой модели ожидаем.</p>
+  <p>Документация и интерфейс используют только локальные файлы, без внешних шрифтов и CDN.</p>
+</main>
+</body></html>

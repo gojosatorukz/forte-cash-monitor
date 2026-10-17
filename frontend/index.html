@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Forte Cash Monitor</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header><a class="brand" href="/">FCM <span>Forte Cash Monitor</span></a><a href="/docs">API и запуск ↗</a></header>
+  <main>
+    <div class="eyebrow">DATATHON 26 · РАБОЧАЯ ОСНОВА</div>
+    <h1>От видеозаписи<br>к проверяемому событию.</h1>
+    <p class="intro">Загрузите запись кассовой операции. Результат анализа будет содержать время события, кадры и основание для проверки.</p>
+    <div id="readiness" class="notice" role="status">Проверяем готовность сервиса…</div>
+    <div class="layout">
+      <section class="panel">
+        <h2>Новая проверка</h2>
+        <form id="upload-form">
+          <label for="api-key">API-ключ</label>
+          <input id="api-key" type="password" autocomplete="off" placeholder="Ключ из вашего локального .env" required>
+          <p class="hint">Ключ используется для запроса и не сохраняется в браузере.</p>
+          <label for="video-file">Видеозапись · MOV · до 64 МБ</label>
+          <input id="video-file" type="file" accept=".mov,video/quicktime" required>
+          <button id="submit-button" type="submit" disabled>Начать анализ</button>
+        </form>
+      </section>
+      <section class="panel result-panel" aria-live="polite">
+        <div class="eyebrow">РЕЗУЛЬТАТ</div>
+        <h2 id="result-title">Пока нет проверки</h2>
+        <p id="result-description">После подключения локального анализатора здесь появятся события и кадры-доказательства.</p>
+        <div id="events"></div>
+      </section>
+    </div>
+    <section class="steps" aria-label="Как работает сервис">
+      <div><span>01</span><h3>Локальная обработка</h3><p>Модели запускаются на оборудовании команды.</p></div>
+      <div><span>02</span><h3>Последовательность</h3><p>Для события проверяется порядок действий.</p></div>
+      <div><span>03</span><h3>Доказательства</h3><p>Исходные кадры, таймкод и проверенное правило.</p></div>
+    </section>
+  </main>
+  <footer>Основа сервиса · Модель ещё предстоит подключить · Подсказка для проверки человеком</footer>
+</body>
+</html>
