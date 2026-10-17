@@ -193,8 +193,9 @@ work/pc_eval.sh <sha|ref> --robust <dataset> ...      # forte-robust: robust/<da
 - What it does: `git archive <sha>` of `detector/` → PC `~/forte/evals/<sha12>/src` (one clean export per commit; the PC's `~/forte/detector` is not used). It rsyncs `work/pc_evals/` (runner + `eval_worker.py`) and the needed videos (`~/forte/evals/data/open`, `~/forte/evals/data/robust/<dataset>`; a set that is already there is skipped). Then it runs `~/forte/evals/run_eval_sha.sh` (blocking, streams per-video lines) and rsyncs the run back.
 - Output: laptop `work/pc_runs/<sha12>-<variant|dataset>-<ts>/` (or `--out DIR`), in the harness format (`summary.json`, `report.md`, `<variant>/<vid>/result.json`). Metrics are recomputed with the harness's own functions from that commit. Extras: `pc_eval.json` (per-worker VRAM peaks) and `.gpu_mem.log`. PC copy: `~/forte/evals/<sha12>/runs/`.
 - Env: a shared offline venv `~/forte/evals/venvs/<hash of pyproject+uv.lock>` (`uv sync --frozen`, `UV_OFFLINE=1`; it fails rather than downloads). Each commit has its own cache `~/forte/evals/<sha12>/cache`, so re-runs of a sha replay perception/VLM answers. `--fresh` uses an empty per-run cache, for timing.
+- Knobs: every `FORTE_*` set in the laptop shell is forwarded to the PC workers, e.g. `FORTE_VERDICT_THR=0.5 work/pc_eval.sh <sha>`. The runner owns `FORTE_DATA_DIR`, `FORTE_CACHE_DIR`, `FORTE_EVAL_CACHE` and `FORTE_VLM_URL` and drops them; the VLM is PC-local. The variables travel as a NUL-separated file and are exported without eval, so no shell injection. The names are printed at start, and names+values go into the run's `pc_eval.json` (`forwarded_env`). With any knob forwarded, the cache is `<sha12>/cache-env-<hash of the knobs>`, so stale answers are never replayed.
 - Limits: at most **3 eval workers across all concurrent invocations** (flock on `~/forte/evals/slot.{0,1,2}.lock`; extra workers wait, and a waiting run's wall time includes the wait). Workers run at `nice 10`. Before each video a worker waits while GPU memory used is above 12 GB. A run refuses to start until VLM `:8090/health` is ok (5 min max).
-- **Kill switch:** `ssh kanat@10.13.0.14 touch ~/forte/evals/STOP`. New runs are refused, and running workers exit before their next video (the partial run is merged; never-run clips are listed and not scored). `rm` it to re-enable.
+- **Kill switch:** `ssh kanat@10.13.0.14 touch ~/forte/evals/STOP`. New runs are refused (exit 3, `REFUSED`). The path unit `forte-evals-stop.path` → `forte-evals-kill.service` SIGTERMs the running `eval_worker.py`/`run_eval_sha.sh` processes (SIGKILL after 10 s). The runner then merges the clips that finished, does not score the unfinished ones (listed in `pc_eval.json` `missing`, `stopped: true`) and exits 6 `STOPPED`. The wrapper still fetches the partial run and prints `STOPPED`. Ctrl-C in the wrapper does the same. The merge step runs as `eval_merge.py`, outside the pkill pattern. Re-enable: `rm ~/forte/evals/STOP && systemctl --user stop forte-evals-kill.service`.
 - Measured (17ddd4e, 42 orig clips, 3 workers, 2026-10-17): wall **414 s**, against 563 s for the sequential c5ef2b6 robust run. Verdicts and types are identical on all 40 shared clips (12/22, FP 0/20). The gain is small because the VLM still had **1 slot** (`/props total_slots=1`): probe time was 1150 s summed against 395 s sequential. Expect more once llama-server runs `-np 4`. Per worker: torch peak 819–836 MiB; process peak 1.17 GB with `expandable_segments` (1.42 GB without). GPU total peak 10.6 GB. During that run a production request (Х-17) took **29.2 s** (9 s idle). Set STOP before demos.
 
 ### Eval cut-off and STOP (PC, systemd --user)
@@ -205,3 +206,108 @@ work/pc_eval.sh <sha|ref> --robust <dataset> ...      # forte-robust: robust/<da
 - Manual stop: `ssh kanat@10.13.0.14 touch ~/forte/evals/STOP`
 - Re-enable evals: `ssh kanat@10.13.0.14 'rm ~/forte/evals/STOP && systemctl --user stop forte-evals-kill.service'`. Stopping the kill service re-arms the path unit.
 - Check: `systemctl --user list-timers forte-evals-cutoff.timer`
+
+### VLM -np 4 (2026-10-17)
+- PC launcher `run_server_pc.sh`: `-np ${NP:-4} -c ${CTX:-16384}`, which gives 4 slots of 4096 context each (an image is about 1100 tokens). VLM VRAM is 5.2 GB, up from 4.7 GB. The previous launcher is kept as `run_server_pc.sh.bak-np1`.
+- Load test under heavy real load (3 PC eval workers + a laptop-side eval + 4 concurrent test callers + 1 production job):
+  - Per-call latency: p50 4.19 s, p95 6.61 s (n=128). Accuracy unchanged.
+  - Production Х-17 via https: **41.1 s**, which is under the 60 s target. GPU memory peaked at 10.6 GB (under 13 GB).
+- The 5080 is compute-bound on image prefill: extra slots add concurrency, not throughput, so production latency grows with the number of active VLM clients.
+- Mitigation:
+  - fewer PC eval workers (proposed default 2)
+  - `touch ~/forte/evals/STOP` before demos
+  - the jury-day 08:00 cut-off timer
+
+## UI password gate (service 0992942, live 2026-10-17)
+- PC `~/forte/.env` (chmod 600): `UI_PASSWORD` (24 chars) and `UI_SECRET` (64 chars), generated on the PC and never printed. The previous env is backed up as `.env.bak-before-ui-auth`. To get the password for the team: `ssh kanat@10.13.0.14 'sed -n "s/^UI_PASSWORD=//p" ~/forte/.env'`
+- Checked from outside over the public URL:
+
+  | Request | Result |
+  |---|---|
+  | `/` | 303 → `/login?next=/` |
+  | `/act.html` | 303 |
+  | `/ui-api/jobs` | 401 |
+  | `/ui-api/feedback.jsonl` | 401 |
+  | `/api/v1/jobs/x` with the key | 404 |
+  | `/api/v1/jobs/x` without the key | 401 |
+  | `/healthz` | 200, no job data |
+
+- Headless Chromium login: a wrong password stays on `/login` and `/ui-api` returns 401. The correct password reaches `/` and `/ui-api` returns 200; the UI renders with its history (screenshot `share/act_e612f80/ui_logged_in_0992942.png`).
+- Proxy trust: requests arrive over the reverse SSH tunnel, so the socket peer is 127.0.0.1. The default `TRUSTED_PROXIES` therefore covers them, and X-Forwarded-For from Caddy is honoured.
+
+## Idle baseline (PC timer)
+- `forte-baseline.timer` fires at `2026-10-18 03:05 UTC` (= 08:05 Almaty), 5 minutes after the eval cut-off. It runs `~/forte/baseline/run_baseline.sh`, which:
+  - waits for STOP and for eval workers to finish;
+  - runs Х-17, Х-43 and Х-14 over https://forte.incode.kz, two rounds each, uploading from the PC;
+  - measures VLM per-call latency over 20 calls with `cache_prompt:false`, so every call does a full image prefill.
+- Results go to `~/forte/baseline/<ts>/log.txt` plus the job JSONs.
+
+## Production detector 378b74f (release of cb4da16), live 2026-10-17 ~21:00 Almaty
+Public smoke with 3 eval workers running, so the timings are inflated:
+
+| Clip | Total | Result | Evidence |
+|---|---|---|---|
+| Х-17 | 25.0 s | T9 @ 7.27 (high) | frames [annotated, raw, annotated], boxes «кассир/посетитель», clip |
+| Х-26 | 29.9 s | **T1 @ 12.38 (high), now caught** | boxes «кассир» / «за стеклом» |
+| Х-32 | 25.7 s | T5 @ 1.0 (medium) | 3 boxed frames |
+| Х-43 | 21.3 s | no_violation ✓ | |
+
+No warnings, not degraded.
+
+## Jury-day runbook (2026-10-18, Almaty time; the PC clock is UTC = Almaty − 5 h)
+| Time | Step | Who/how |
+|---|---|---|
+| **08:00** | Eval cut-off: `forte-evals-cutoff.timer` creates `~/forte/evals/STOP`, and the path unit kills in-flight eval workers | automatic (PC) |
+| **08:05** | Idle baseline: `forte-baseline.timer` runs `~/forte/baseline/run_baseline.sh` (Х-17/43/14 ×2 via https + 20 VLM calls) | automatic (PC) |
+| ~08:20 | Copy `~/forte/baseline/<ts>/log.txt` numbers into this doc (deck numbers) and send them to orchestrator + forte-docs | forte-deploy |
+| by ~09:30 | Final ff of detector/service main (orchestrator), then deploy: rsync (excl. .venv .claude data models .env), `UV_OFFLINE=1 uv sync --frozen --inexact`, `systemctl --user restart forte-service`, public smoke Х-17/Х-26/Х-32/Х-43 | orchestrator → forte-deploy |
+| **10:00** | Freeze and curate: `ssh kanat@10.13.0.14 ~/forte/curate_jobs.sh` (source `work/curate_jobs.sh`). It stops the service, moves data/{jobs,clips,uploads} to `data.bak-<ts>` and starts the service. It then runs Х-17, Х-26 and Х-43 via https and adds a completed review on Х-17 («Демо-проверяющий», all violations confirmed, decision confirmed). It prints the act URL, which then has no ЧЕРНОВИК. Check the act in headless Chromium. | forte-deploy |
+| **10:30** | Final external checks (below) | forte-deploy |
+| ≤12:00 | Submit (URL https://forte.incode.kz, API key for the jury) | orchestrator / user |
+
+Final external checks at 10:30:
+- `https://forte.incode.kz/healthz` returns `analyzer_ready`, `vlm_ok` and `public_url`.
+- The gate: `/` → 303 `/login`; `/ui-api/jobs` → 401; `/api/v1/jobs/x` with the key → 404, without it → 401.
+- An authenticated end-to-end run of Х-17 via https, with the clip download.
+- A headless login with UI_PASSWORD, and the curated act renders.
+- On the PC: forte-vlm, forte-service and forte-relay are active, `~/forte/evals/STOP` exists, no `eval_worker.py` is running, and VRAM is about 6 GB.
+- Don'ts: do not restart forte-relay or forte-vlm, and do not remove STOP until after judging.
+
+## Service 0a1878a (gate hardening), live 2026-10-17
+- Gate re-verified from outside:
+  - `/` → 303 `/login`; `/ui-api/jobs` → 401; `/api/v1` with the key → 404 (works)
+  - headless login: a wrong password stays on `/login`, the correct one reaches `/` and `/ui-api` returns 200
+- `TRUSTED_PROXIES` defaults to loopback, which is correct here: the relay is an SSH reverse tunnel to 127.0.0.1, and Caddy's X-Forwarded-For carries the real client.
+- Lockout test (20 failures per 5 min per client IP):
+
+  | Client | Attempt | Result |
+  |---|---|---|
+  | laptop via the public URL | 20 wrong logins | 401 ×20 |
+  | laptop via the public URL | 21st attempt | **429** |
+  | laptop via the public URL | correct password | 429 (locked) |
+  | laptop via the public URL | correct password + spoofed `X-Forwarded-For: 1.2.3.4` | 429 (the spoof is ignored, because the rightmost XFF entry from Caddy is used) |
+  | PC direct `127.0.0.1:8000` | correct password, at the same time | **303 + cookie** |
+
+  So clients are keyed by their real IP, not one shared loopback IP. The lock expired by itself after the window.
+  - The venue LAN (laptop and PC) shares one public egress IP, so team members behind the same NAT share one lockout counter.
+- The cookie over https is `forte_ui=…; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200; Secure`.
+
+## Production detector 9f8d3b9 (= gated ba2f4df), live 2026-10-17
+- Public smoke (idle-ish):
+
+  | Clip | Result | Time | Notes |
+  |---|---|---|---|
+  | Х-17 | T9 @ 7.27 | 6.2 s | |
+  | Х-26 | T1 @ 12.38 | 6.5 s | |
+  | Х-32 | T5 @ 1.0 | 5.6 s | |
+  | Х-43 | clean | 7.1 s | |
+  | Х-35 | **T15** @ 9.0 (low, п. 19 пп. 1) | 52.6 s | under eval load, 37 VLM calls |
+  | Х-19 | clean ×2 | | the known 1-of-4 team-T15 miss, matches the gate (forte-detector); artifacts in `share/x19_prod_9f8d3b9/` |
+
+- Gate numbers (orchestrator):
+
+  | Set | Recall | FP | Other |
+  |---|---|---|---|
+  | orig | 19/22 | 3/20, all team-T15 (0/16 excluding them) | hard-neg 2/19, hit@5s 82% |
+  | reencode | 18/22 | 4/16 excl. | |
+  | newcam | 15/22 | 9/20 | |

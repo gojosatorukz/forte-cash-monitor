@@ -17,6 +17,8 @@ DEFAULT_ANALYZER = "app.analyzers.stub:StubAnalyzer"
 DEFAULT_JOB_TIMEOUT_SEC = 270.0
 DEFAULT_JOB_HARD_CAP_SEC = 280.0  # absolute ceiling from submission (jury limit: 300 s)
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+DEFAULT_UI_SESSION_HOURS = 12.0
+DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,::1/128"
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -70,6 +72,12 @@ class Settings:
     # VLM /health URL probed by /healthz; None -> not probed (vlm_ok: null). from_env derives it
     # from VLM_HEALTH_URL / FORTE_VLM_URL (see app.health).
     vlm_health_url: str | None = None
+    # Browser UI gate (app.ui_auth). No UI_PASSWORD and no UI_OPEN -> UI answers 503; /api/v1 unaffected.
+    ui_password: str = ""
+    ui_open: bool = False  # UI_OPEN=1: no gate (dev/tests only)
+    ui_secret: str = ""  # cookie signing key; empty -> DATA_DIR/ui_secret (generated, 0600)
+    ui_session_hours: float = DEFAULT_UI_SESSION_HOURS
+    trusted_proxies: str = DEFAULT_TRUSTED_PROXIES  # CIDRs whose X-Forwarded-For/-Proto are trusted
 
     @property
     def uploads_dir(self) -> Path:
@@ -113,6 +121,11 @@ class Settings:
             public_hostname=(os.environ.get("PUBLIC_HOSTNAME") or "").strip(),
             rules_path=(os.environ.get("RULES_PATH") or "").strip(),
             vlm_health_url=vlm_health_url_from_env(),
+            ui_password=os.environ.get("UI_PASSWORD") or "",
+            ui_open=_env_bool("UI_OPEN"),
+            ui_secret=os.environ.get("UI_SECRET") or "",
+            ui_session_hours=_env_positive_sec("UI_SESSION_HOURS", DEFAULT_UI_SESSION_HOURS),
+            trusted_proxies=(os.environ.get("TRUSTED_PROXIES") or DEFAULT_TRUSTED_PROXIES),
         )
 
 

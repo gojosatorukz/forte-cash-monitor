@@ -16,7 +16,7 @@ from forte_detector import config
 HYP_TYPES: dict[str, list[str]] = {
     "X-1": ["T10"], "X-2": ["T15", "T10"],
     "X-4": ["T2"], "X-47": ["T2"], "X-38": ["T2"],
-    "X-11": ["T4"], "X-13": ["T8", "T4"], "X-28": ["T4"],
+    "X-11": ["T4", "T3"], "X-13": ["T8"], "X-28": ["T4"],
     "X-15": ["T1"], "X-24": ["T1b"], "X-26": ["T1"],
     "X-17": ["T9"],
     "X-18": ["T2"],
@@ -27,6 +27,15 @@ HYP_TYPES: dict[str, list[str]] = {
     "X-44": ["T8"],
     "X-46": ["T12"],
 }
+
+# Team labels (human review round 2, team decision 17.10): a missing client ID is a T15 procedure
+# violation even where the organizer says clean. Scoring stays on the organizer `violation` labels;
+# `team_types` is reported separately.
+TEAM_TYPES: dict[str, list[str]] = {
+    "X-19": ["T15"], "X-35": ["T15"], "X-37": ["T15"], "X-39": ["T15"],
+    "X-2": ["T15", "T10"], "X-11": ["T4", "T3"], "X-13": ["T8"], "X-1": ["T10"],
+}
+TEAM_T15_CLEAN = ("X-19", "X-35", "X-37", "X-39")  # organizer-clean, team-T15
 
 # Identical files: their label seconds are valid targets for both ids.
 DUPLICATES: list[tuple[str, str]] = [("X-4", "X-47"), ("X-5", "X-48")]
@@ -110,6 +119,7 @@ def build_labels(xlsx: Path, videos: Path) -> dict:
             "violation": is_violation,
             "label_sec": parse_label_seconds(ts),
             "hyp_types": list(HYP_TYPES.get(vid, [])) if is_violation else [],
+            "team_types": list(TEAM_TYPES.get(vid, HYP_TYPES.get(vid, []) if is_violation else [])),
             "duration_sec": video_duration(videos / files[vid]),
         }
     return merge_duplicate_seconds(labels)

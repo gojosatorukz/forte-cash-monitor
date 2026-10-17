@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Акт проверки соблюдения кассовой дисциплины</title>
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="assets/brand/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="act.css">
+</head>
+<body>
+  <div class="toolbar" id="toolbar">
+    <div class="toolbar__inner">
+      <img class="toolbar__logo" src="assets/brand/forte-magenta.svg" width="74" height="22" alt="Forte">
+      <a class="toolbar__back" href="./" id="back-link">← К результатам проверки</a>
+      <span class="toolbar__hint">Чтобы сохранить в PDF, нажмите «Печать» и выберите «Сохранить как PDF».</span>
+      <button type="button" class="toolbar__btn" id="print-btn" disabled>Печать / Сохранить в PDF</button>
+    </div>
+  </div>
+
+  <main class="sheet" id="sheet" aria-live="polite">
+    <p class="state" id="state">Формирование акта…</p>
+  </main>
+
+  <script src="act.js" defer></script>
+</body>
+</html>

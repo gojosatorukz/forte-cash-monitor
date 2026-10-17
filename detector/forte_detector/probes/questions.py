@@ -25,19 +25,24 @@ class QuestionSpec:
     multi: str = "key"  # "key" | "any"
     min_side: int = 448  # crops are upscaled so their long side reaches this (at most 4x, runner._crop)
     full_prompt: str | None = None  # used instead of `prompt` when the ROI is unknown (full frame)
+    autocontrast: bool = False  # stretch the crop's 1-99 % luminance (dark / washed-out cameras)
 
 
 DESK = "Close-up of a cashier's desk in a bank cash room, seen from a ceiling camera. "
 DESK_FIXED = ("Ignore the fixed equipment: the banknote counting machine, the small banknote detector, "
               "the desk telephone and the laptop. ")
 
-# Desk cues use the calibrated desk crop upscaled to 672 px: on full 464x848 frames a small cash stack
+# Desk cues use the calibrated desk crop upscaled (672 px; cash 896 px): on full 464x848 frames a small cash stack
 # or two stamps are a few pixels and the 4B model answers "no" (X-38 @30-34 s, X-24 @12 s).
 SPECS: dict[str, QuestionSpec] = {
     "cash_on_desk": QuestionSpec(
-        DESK + "Is there paper money lying on the desk top: a banknote, a small stack of notes or a cash "
-        "bundle? Do not count notes inside the counting machine. " + DESK_FIXED,
-        roi="desk", margin=0.05, min_side=672,
+        # tuned live (4B): pointing at the desk surface and saying the bundle may be small fixes X-38
+        # (small brick of notes next to the laptop); crops upscaled to 896 px
+        "Close-up of a cashier's desk seen from a ceiling camera. Look at the desk surface itself, not at "
+        "the machines. Is any money lying there: banknotes or a bundle / stack of banknotes (it may be "
+        "small, a few centimetres; e.g. light blue, green or beige notes)? Do not count notes that are "
+        "inside the counting machine (in its feed hopper or output stacker). Answer yes if you see any.",
+        roi="desk", margin=0.05, min_side=896,
         full_prompt=SCENE + "Are banknotes or bundles of cash lying on the desk surface? " + FIXED
         + "Answer yes only if paper money is visible on the desk.",
     ),
@@ -57,10 +62,15 @@ SPECS: dict[str, QuestionSpec] = {
         "lying on the desk? " + FIXED + "Answer no for loose paper sheets, banknotes and bags.",
     ),
     "screen_on_unlocked": QuestionSpec(
-        "Look at the laptop. Is its screen showing an unlocked application (e.g. a spreadsheet, document, "
-        "white window with rows) rather than a lock screen, wallpaper or black screen? "
-        "Answer yes if application content is visible.",
-        roi="laptop", margin=0.25,
+        # robustness (newcam_combo X-11: blur + JPEG q30 erase the spreadsheet rows, leaving a bright
+        # white screen that the old "rows visible" wording answered "no"): say that a bright, mostly
+        # white/light window counts even when its text is unreadable
+        "Look at the laptop. Is its screen showing an unlocked application window (e.g. a document, "
+        "spreadsheet or form)? An application window looks bright and mostly white or light grey, "
+        "possibly with rows or text; on a blurry or low-quality image the text may be unreadable, which "
+        "still counts as yes. Answer no for a black or switched-off screen, a closed lid, or a colourful "
+        "photo-like wallpaper / lock screen.",
+        roi="laptop", margin=0.25, autocontrast=True,
     ),
     "safe_open": QuestionSpec(
         SCENE + "Look at the grey metal safe (a small steel cabinet). Is the safe door open, i.e. swung away "
@@ -86,13 +96,17 @@ SPECS: dict[str, QuestionSpec] = {
         "piece of clothing such as a coat or jacket? Ignore green cash-collection bags and the fixed equipment.",
     ),
     "phone_visible": QuestionSpec(
-        SCENE + "Is anyone holding or using a mobile phone (smartphone)? Ignore the desk telephone with "
-        "a handset and cord.",
+        SCENE + "Is anyone holding or using a mobile phone (smartphone) in their hand? Ignore the desk "
+        "telephone with a handset and cord and any devices standing on the desk.",
         multi="any",
     ),
+    # T15 keys on "no" here. A desk/client-side crop with a card-vs-banknotes prompt was tried
+    # (43b541a) and was WORSE on the PC full.analyze probe logs (video-level 7/13 vs 9/13: upscaled
+    # notes in hands read as "card"), so the full-frame question stays.
     "id_document_shown": QuestionSpec(
-        SCENE + "Is someone handing over, holding up or showing an identity document, i.e. a small "
-        "card-sized white or plastic card or a passport? Answer no for banknotes.",
+        SCENE + "Is someone handing over, holding up or showing an identity document: a plastic ID card "
+        "(credit-card size) or a passport booklet? Banknotes, stacks of cash, cash bags and paper "
+        "slips are NOT identity documents - answer no if only money is being handed over.",
         multi="any",
     ),
     "counting_machine_used": QuestionSpec(

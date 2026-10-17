@@ -2,7 +2,8 @@
 # Start the cash-room video check service (FastAPI + web UI) locally.
 # Usage: ./run.sh
 # Env: API_KEY, HOST, PORT, DATA_DIR, ANALYZER, JOB_TIMEOUT_SEC (default 270),
-#      JOB_HARD_CAP_SEC (default 280; absolute ceiling from submit), STUB_DEBUG, MAX_UPLOAD_MB
+#      JOB_HARD_CAP_SEC (default 280; absolute ceiling from submit), STUB_DEBUG, MAX_UPLOAD_MB,
+#      UI_PASSWORD (web UI login; unset -> UI disabled), UI_SECRET, UI_SESSION_HOURS, TRUSTED_PROXIES
 # Deadline per job = min(max(submit + JOB_TIMEOUT_SEC, start + 20 s), submit + JOB_HARD_CAP_SEC).
 set -euo pipefail
 
@@ -42,7 +43,16 @@ if [[ -z "${API_KEY:-}" ]]; then
     echo "warning: API_KEY is not set; the default key 'forte-datathon-2026' will be used." >&2
 fi
 
-HOST="${HOST:-0.0.0.0}"
+if [[ -z "${UI_PASSWORD:-}" && "${UI_OPEN:-}" != "1" ]]; then
+    echo "warning: UI_PASSWORD is not set; the web UI is disabled (503). /api/v1 works." >&2
+fi
+
+# Loopback by default: the relay (autossh), Funnel and a local browser all connect to localhost.
+# LAN demo / NetBird: HOST=0.0.0.0 (or the NetBird IP) - then anyone on that network reaches the port.
+HOST="${HOST:-127.0.0.1}"
+if [[ "$HOST" != "127.0.0.1" && "$HOST" != "localhost" && "$HOST" != "::1" ]]; then
+    echo "warning: HOST=$HOST - the service is reachable from other machines on that network." >&2
+fi
 PORT="${PORT:-8000}"
 echo "Starting on http://${HOST}:${PORT}  (UI: http://localhost:${PORT}/)" >&2
 

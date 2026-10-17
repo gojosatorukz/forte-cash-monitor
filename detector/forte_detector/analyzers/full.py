@@ -227,6 +227,25 @@ def _runner_kwargs(runner) -> set:
     return {k for k in ("calibration", "deadline") if k in params}
 
 
+def _supporting_probes(e: Event, pairs) -> list[dict]:
+    """Probe answers behind an event, inside its window or at its evidence times: positive, count AND
+    negative answers (e.g. T15 relies on the ID probes saying "no"), each with the normalized ROI the
+    probe used, for evidence-box drawing (Task 6). Undecided (None) answers are left out."""
+    lo, hi = min(e.start_sec, e.timecode_sec) - 0.5, max(e.end_sec, e.timecode_sec) + 0.5
+    ev = set(e.evidence_ts)
+    out = []
+    for q, r in pairs:
+        raw = r.raw or {}
+        decided = r.value is not None or raw.get("count") is not None
+        if not decided or not (lo <= q.t <= hi or round(q.t, 2) in ev):
+            continue
+        roi = raw.get("roi") or (list(q.roi) if q.roi else None)
+        out.append({"cue": q.cue, "t": q.t, "extra_ts": list(q.extra_ts), "value": r.value,
+                    "count": raw.get("count"), "conf": r.conf, "source": r.source,
+                    "roi": [round(float(v), 4) for v in roi] if roi else None})
+    return out[:8]
+
+
 UNAVAILABLE_ERRORS = ("vlm_unavailable", "no_runner")
 
 
@@ -248,10 +267,14 @@ def _probe_status(memo: dict, runner) -> dict:
                    and x.source != "coco" and not raw(x).get("error") for x in vlm)
     requested = len(vlm)
     unavailable = requested > 0 and (runner is None or (down > 0 and answered == 0))
+    # partial: the VLM dropped out for some requests only; rules relying on them may stay silent
+    partial = bool(down > 0 and not unavailable)
     return {"requested": requested, "answered": answered, "vlm_unavailable": down,
             "deadline_skipped": sum(why(x) == "deadline" for x in vlm),
             "budget_skipped": sum(why(x) == "budget" for x in vlm),
-            "unavailable": bool(unavailable)}
+            "unavailable": bool(unavailable), "partial": partial,
+            "note": ("часть VLM-проверок не выполнена (сервер недоступен), часть нарушений могла быть пропущена"
+                     if partial else "")}
 
 
 def analyze(
@@ -411,7 +434,8 @@ def analyze(
                                                            "key": r.context.get("key")},
                        "result": {"value": x.value, "conf": x.conf, "source": x.source,
                                   "count": (x.raw or {}).get("count"),
-                                  "skipped": (x.raw or {}).get("skipped"), "error": (x.raw or {}).get("error")}}
+                                  "skipped": (x.raw or {}).get("skipped"), "error": (x.raw or {}).get("error"),
+                                  "roi": (x.raw or {}).get("roi") or (list(r.roi) if r.roi else None)}}
                       for r, x in pairs]
         try:
             evs = item.rule.decide(ctx, pairs)
@@ -419,6 +443,7 @@ def analyze(
             log.warning("rule %s failed: %s", item.rule.name, e)
             evs = []
         for e in sorted(evs, key=lambda e: -e.confidence):
+            e.extra.setdefault("probes_used", _supporting_probes(e, pairs))
             acc.add(e)
     disk.save()
     stage["probes_rules"] = round(time.perf_counter() - ts, 3)
@@ -427,6 +452,7 @@ def analyze(
     status = _probe_status(memo, runner)
     degraded = status["unavailable"]
     stage["degraded"] = float(degraded)
+    stage["partial_vlm"] = float(status["partial"])
     prog(1.0, "done")
     slim = {k: v for k, v in tl.items() if k not in ("series", "tracks")}
     slim["series_len"] = len(tl.get("series", {}).get("t", []))

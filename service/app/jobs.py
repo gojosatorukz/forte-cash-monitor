@@ -11,7 +11,7 @@ import threading
 import unicodedata
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app.models import JobRecord, now_iso
 
@@ -134,6 +134,19 @@ class JobStore:
             self._jobs[job_id] = rec
             if persist:
                 self._save(rec)
+            return rec.model_copy(deep=True)
+
+    def mutate(self, job_id: str, fn: Callable[[JobRecord], dict[str, Any]]) -> JobRecord | None:
+        """Read-modify-write under the lock: `fn(copy of the record)` returns the fields to set
+        (it may raise to abort; nothing is written then). None if the job does not exist."""
+        with self._lock:
+            rec = self._jobs.get(job_id)
+            if rec is None:
+                return None
+            fields = fn(rec.model_copy(deep=True))
+            rec = rec.model_copy(update=fields)
+            self._save(rec)  # disk first: a failed write leaves the in-memory record unchanged
+            self._jobs[job_id] = rec
             return rec.model_copy(deep=True)
 
     def persist(self, job_id: str) -> None:

@@ -1,7 +1,8 @@
-"""FastAPI app: public API (/api/v1, X-API-Key), UI API (/ui-api), health, static UI at /."""
+"""FastAPI app: public API (/api/v1, X-API-Key), UI API (/ui-api, password session), health, static UI at /."""
 
 from __future__ import annotations
 
+import json
 import logging
 import mimetypes
 import re
@@ -14,7 +15,8 @@ from typing import Any
 from urllib.parse import unquote
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from python_multipart.multipart import MultipartParseError, MultipartParser, parse_options_header
 from starlette.requests import ClientDisconnect
@@ -22,7 +24,9 @@ from starlette.requests import ClientDisconnect
 from app.config import Settings
 from app.health import VlmProbe
 from app.jobs import JobStore, new_job_id, sanitize_filename
+from app.review import MAX_BODY_BYTES, ReviewError, feedback_ndjson, merge_review
 from app.rules import display_path, load_rules_auto
+from app.ui_auth import UiGate
 from app.worker import Worker, clip_url
 
 log = logging.getLogger(__name__)
@@ -32,6 +36,7 @@ UI_JOBS_LIMIT = 20
 WRITE_BUFFER = 1024 * 1024  # uploads are written to disk in 1 MB chunks
 NOT_FOUND = "Задача не найдена (job not found)"
 CLIP_NOT_FOUND = "Видеофрагмент не найден (clip not found)"
+REVIEW_NOT_DONE = "Проверка доступна только для завершённой задачи (review allowed only when status is done)"
 CLIP_NAME_RE = re.compile(r"([1-9][0-9]{0,5})\.mp4")  # "<n>.mp4", n a positive int
 
 VIDEO_TYPES = {
@@ -218,6 +223,39 @@ async def receive_upload(request: Request, settings: Settings) -> tuple[str, str
             shutil.rmtree(job_dir, ignore_errors=True)
 
 
+async def read_json_body(request: Request, cap: int) -> Any:
+    """Small JSON body with a hard size cap (413), malformed JSON -> 422."""
+    too_big = f"Тело запроса больше {cap // 1024} КБ (body too large)"
+    try:
+        if int(request.headers.get("content-length", "") or 0) > cap:
+            raise HTTPException(413, too_big)
+    except ValueError:
+        pass
+    buf = bytearray()
+    try:
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) > cap:
+                raise HTTPException(413, too_big)
+    except ClientDisconnect:
+        raise HTTPException(400, "Запрос прерван клиентом (client disconnected)") from None
+    try:
+        return json.loads(bytes(buf).decode("utf-8"))
+    except (ValueError, RecursionError):  # bad UTF-8 / JSON, or nesting deep enough to exhaust the stack
+        raise HTTPException(422, "Ожидается JSON-объект (malformed JSON body)") from None
+
+
+def require_json_content_type(request: Request) -> None:
+    """415 unless Content-Type is application/json (parameters such as charset allowed).
+
+    A cross-site form or `fetch(..., {mode: "no-cors"})` can only send "simple" content types;
+    requiring JSON forces a CORS preflight, which this service never answers, so the key-less
+    review route cannot be driven from another origin."""
+    mime = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if mime != "application/json":
+        raise HTTPException(415, "Ожидается Content-Type: application/json (unsupported media type)")
+
+
 # ---------- app factory ----------
 
 def _setup_logging() -> None:
@@ -274,6 +312,9 @@ def create_app(settings: Settings | None = None, analyzer: Any = None) -> FastAP
     app.state.settings = settings
     app.state.rules = rules
     app.state.vlm_probe = VlmProbe(settings.vlm_health_url)
+    # Browser UI password gate: everything except /api/v1/*, /healthz, /login, /logout needs the
+    # session cookie (allowlist, so new routes are gated by default). /api/v1 stays API-key only.
+    app.add_middleware(UiGate, settings=settings)
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception):
@@ -309,6 +350,35 @@ def create_app(settings: Settings | None = None, analyzer: Any = None) -> FastAP
             if v.get("clip_url"):
                 v["clip_url"] = clip_url(pub["job_id"], n, prefix="/ui-api")
         return pub
+
+    async def review(request: Request, job_id: str) -> dict[str, Any]:
+        """Merge a partial review update into the job (under the store lock, atomic write)."""
+        require_json_content_type(request)
+        store = store_of(request)
+        job = store.get(job_id)
+        if job is None:
+            raise HTTPException(404, NOT_FOUND)
+        if job.status != "done":
+            raise HTTPException(409, REVIEW_NOT_DONE)
+        patch = await read_json_body(request, MAX_BODY_BYTES)
+
+        def apply(rec):
+            if rec.status != "done":
+                raise HTTPException(409, REVIEW_NOT_DONE)
+            try:
+                return {"review": merge_review(rec.review, patch, len(rec.violations))}
+            except ReviewError as e:
+                raise HTTPException(422, str(e)) from None
+
+        rec = await run_in_threadpool(store.mutate, job_id, apply)
+        if rec is None:
+            raise HTTPException(404, NOT_FOUND)
+        return rec.to_public()
+
+    def feedback(request: Request) -> Response:
+        jobs = store_of(request).list()[::-1]  # oldest first (creation order)
+        return Response(feedback_ndjson(jobs), media_type="application/x-ndjson",
+                        headers={"Content-Disposition": 'attachment; filename="feedback.jsonl"'})
 
     def clip_response(request: Request, job_id: str, name: str) -> FileResponse:
         m = CLIP_NAME_RE.fullmatch(name)
@@ -355,7 +425,15 @@ def create_app(settings: Settings | None = None, analyzer: Any = None) -> FastAP
     def api_job_clip(job_id: str, name: str, request: Request):
         return clip_response(request, job_id, name)
 
-    # ----- UI API (no key) -----
+    @app.post("/api/v1/jobs/{job_id}/review", dependencies=[Depends(require_key)])
+    async def api_job_review(job_id: str, request: Request):
+        return await review(request, job_id)
+
+    @app.api_route("/api/v1/feedback.jsonl", methods=["GET", "HEAD"], dependencies=[Depends(require_key)])
+    def api_feedback(request: Request):
+        return feedback(request)
+
+    # ----- UI API (no key; gated by the UiGate session cookie) -----
     @app.post("/ui-api/analyze")
     async def ui_analyze(request: Request):
         return await analyze(request, time.monotonic())
@@ -374,6 +452,14 @@ def create_app(settings: Settings | None = None, analyzer: Any = None) -> FastAP
     @app.api_route("/ui-api/jobs/{job_id}", methods=["GET", "HEAD"])
     def ui_job(job_id: str, request: Request):
         return ui_urls(job_public(request, job_id))
+
+    @app.post("/ui-api/jobs/{job_id}/review")
+    async def ui_job_review(job_id: str, request: Request):
+        return ui_urls(await review(request, job_id))
+
+    @app.api_route("/ui-api/feedback.jsonl", methods=["GET", "HEAD"])
+    def ui_feedback(request: Request):
+        return feedback(request)
 
     @app.api_route("/ui-api/jobs/{job_id}/clips/{name}", methods=["GET", "HEAD"])
     def ui_job_clip(job_id: str, name: str, request: Request):

@@ -113,8 +113,18 @@
     return detail ? String(detail) : "Ошибка сервера (код " + status + ").";
   }
 
+  // Session expired / not logged in (401 from /ui-api): back to the login page, keeping the
+  // current path and #job=... so the user lands where they were.
+  var loginRedirected = false;
+  function toLogin() {
+    if (loginRedirected) return;
+    loginRedirected = true;
+    location.replace("/login?next=" + encodeURIComponent(location.pathname + location.search + location.hash));
+  }
+
   function fetchJSON(url) {
     return fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" }).then(function (r) {
+      if (r.status === 401) toLogin();
       return r.text().then(function (t) {
         var body = null;
         try { body = t ? JSON.parse(t) : null; } catch (e) { body = null; }
@@ -163,7 +173,11 @@
     sections.progress.hidden = which !== "progress";
     sections.error.hidden = which !== "error";
     sections.result.hidden = which !== "result";
+    document.body.setAttribute("data-view", which);
+    var crumb = $("crumb-current");
+    if (crumb) crumb.textContent = CRUMBS[which] || "Проверки";
   }
+  var CRUMBS = { upload: "Новая проверка", progress: "Анализ записи", error: "Ошибка проверки", result: "Результат проверки" };
 
   // ---------- File selection ----------
   var fileInput = $("file-input"), dropzone = $("dropzone");
@@ -287,6 +301,7 @@
       }
     });
     xhr.addEventListener("load", function () {
+      if (xhr.status === 401) toLogin();
       state.xhr = null;
       var body = null;
       try { body = JSON.parse(xhr.responseText); } catch (err) { body = null; }
@@ -407,8 +422,10 @@
     setUploadError("Выберите видеофайл повторно, чтобы запустить новую проверку.");
   });
   $("new-check-btn-err").addEventListener("click", goHome);
-  $("new-check-btn").addEventListener("click", goHome);
   $("brand-link").addEventListener("click", function (e) { e.preventDefault(); goHome(); });
+  document.querySelectorAll(".js-home:not(#brand-link)").forEach(function (a) {
+    a.addEventListener("click", function (e) { e.preventDefault(); goHome(); });
+  });
 
   function goHome() {
     stopPolling();
@@ -450,8 +467,13 @@
 
   function renderResult(job) {
     show("result");
-    var vs = Array.isArray(job.violations) ? job.violations.slice() : [];
-    vs.sort(function (a, b) { return (num(a && a.timecode_sec) || 0) - (num(b && b.timecode_sec) || 0); });
+    // `_n`: the server's 1-based violation number (clip_url / review key), kept through the sort.
+    var vs = (Array.isArray(job.violations) ? job.violations : []).map(function (v, i) {
+      v = (v && typeof v === "object") ? v : {};
+      v._n = i + 1;
+      return v;
+    });
+    vs.sort(byTime);
     state.violations = vs;
     var n = vs.length;
     var bad = job.verdict === "violation" || (job.verdict == null && n > 0);
@@ -506,8 +528,9 @@
           onclick: function () { $("rules-open").click(); } })
       ]));
     } else {
-      vs.forEach(function (v, i) { list.appendChild(renderViolation(v || {}, i)); });
+      vs.forEach(function (v, i) { list.appendChild(renderViolation(v, i)); });
     }
+    renderReview(job, vs);
   }
 
   // Analyzer / service notes (e.g. «анализ выполнен без VLM-проверок…»), shown above the violations.
@@ -582,6 +605,13 @@
     return box;
   }
 
+  // Display order (same key as act.js): interval start, then timecode, then the server number.
+  // Cards and the act show the server number `_n`, so references agree whatever the order.
+  function byTime(a, b) {
+    return ((startOf(a) || 0) - (startOf(b) || 0)) ||
+      ((num(a.timecode_sec) || 0) - (num(b.timecode_sec) || 0)) || (a._n - b._n);
+  }
+
   // Start of a violation interval: start_sec if given, else the timecode.
   function startOf(v) {
     var s = score(v && v.start_sec);
@@ -613,7 +643,7 @@
 
     var card = el("article", { class: "vcard", id: "violation-" + i, "aria-labelledby": "vtitle-" + i }, [
       el("div", { class: "vcard__top" }, [
-        el("span", { class: "vcard__num", "aria-hidden": "true", text: String(i + 1) }),
+        el("span", { class: "vcard__num", "aria-hidden": "true", title: "Срабатывание № " + (v._n || i + 1), text: String(v._n || i + 1) }),
         el("div", { class: "vcard__heading" }, [
           el("h4", { class: "vcard__title", id: "vtitle-" + i }, [
             typeId ? el("span", { class: "type-id", title: "Код типа нарушения", text: typeId }) : null,
@@ -661,6 +691,7 @@
         el("div", { class: "rule__none", text: "Норма не определена — требуется проверка специалистом" })
       ]));
     }
+    card.appendChild(el("div", { class: "rv-slot", "data-n": String(v._n || i + 1) }));
     return card;
   }
 
@@ -749,6 +780,355 @@
     return box;
   }
 
+  // ---------- Human review ----------
+  // The automatic result is a hint: a specialist confirms / rejects each violation and records the
+  // final decision. Review inputs render once per job open; later state comes only from the user's
+  // own edits and the POST responses, so polling can never overwrite what is being typed.
+  var REVIEW_DEBOUNCE_MS = 600;
+  var LS_NAME = "forte.reviewer_name", LS_POS = "forte.reviewer_position";
+  var RV_STATUS = {
+    confirmed: { text: "Подтверждено", cls: "rv-chip--confirmed" },
+    rejected: { text: "Отклонено", cls: "rv-chip--rejected" },
+    pending: { text: "Не проверено", cls: "rv-chip--pending" }
+  };
+  var RV_DECISIONS = [
+    ["confirmed", "Нарушение подтверждено"],
+    ["rejected", "Нарушений нет"],
+    ["needs_followup", "Требуется дополнительная проверка"]
+  ];
+  var rv = null; // per-job review session, see renderReview
+
+  function lsGet(k) { try { return window.localStorage.getItem(k) || ""; } catch (e) { return ""; } }
+  function lsSet(k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* storage unavailable */ } }
+  function hhmm(d) { return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); }
+
+  /** Merge patch b into patch a (violation entries merged per number); returns a. */
+  function mergePatch(a, b) {
+    Object.keys(b || {}).forEach(function (k) {
+      if (k === "violations") {
+        a.violations = a.violations || {};
+        Object.keys(b.violations).forEach(function (n) {
+          a.violations[n] = Object.assign({}, a.violations[n] || {}, b.violations[n]);
+        });
+      } else {
+        a[k] = b[k];
+      }
+    });
+    return a;
+  }
+
+  function rvEntry(n) {
+    var e = rv.local.violations[String(n)];
+    return e || { status: "pending", comment: "" };
+  }
+
+  function rvSetIndicator(origin, kind, msg) {
+    var node = rv.ui.ind[origin];
+    if (!node) return;
+    node.textContent = "";
+    node.className = "rv-save" + (kind ? " rv-save--" + kind : "");
+    if (kind === "saving") node.textContent = "Сохранение…";
+    else if (kind === "saved") node.textContent = "Сохранено ✓ " + hhmm(new Date());
+    else if (kind === "error") {
+      node.appendChild(el("span", { text: "Не сохранено: " + msg }));
+      node.appendChild(el("button", { type: "button", class: "btn btn--text btn--xs", text: "Повторить",
+        onclick: function () { rvFlush(); } }));
+    }
+  }
+
+  function rvQueue(patch, origin, debounce) {
+    var session = rv;
+    mergePatch(session.patch, patch);
+    session.origins[origin] = true;
+    clearTimeout(session.timer);
+    session.timer = null;
+    if (debounce) session.timer = setTimeout(function () { session.timer = null; rvFlush(session); }, REVIEW_DEBOUNCE_MS);
+    else rvFlush(session);
+  }
+
+  function rvHasWork(session) {
+    return session.inflight || session.timer || Object.keys(session.patch).length > 0;
+  }
+
+  /** Send the accumulated patch (one request at a time per job). */
+  function rvFlush(session) {
+    session = session || rv;
+    if (!session) return;
+    clearTimeout(session.timer);
+    session.timer = null;
+    if (session.inflight) return; // the response handler sends what accumulated meanwhile
+    // Reviewer fields travel with every save once they differ from the stored review.
+    if (session.ui.name) {
+      var name = session.ui.name.value.trim(), pos = session.ui.pos.value.trim();
+      var saved = session.data || {};
+      if (name !== (saved.reviewer_name || "") && session.patch.reviewer_name === undefined && session.sent.reviewer_name !== name) session.patch.reviewer_name = name;
+      if (pos !== (saved.reviewer_position || "") && session.patch.reviewer_position === undefined && session.sent.reviewer_position !== pos) session.patch.reviewer_position = pos;
+    }
+    var patch = session.patch;
+    if (!Object.keys(patch).length) { rvSettle(session); return; }
+    var origins = Object.keys(session.origins);
+    session.patch = {};
+    session.origins = {};
+    session.inflight = true;
+    if (patch.reviewer_name !== undefined) session.sent.reviewer_name = patch.reviewer_name;
+    if (patch.reviewer_position !== undefined) session.sent.reviewer_position = patch.reviewer_position;
+    var live = function () { return rv === session; };
+    origins.forEach(function (o) { if (live()) rvSetIndicator(o, "saving"); });
+    fetch(API + "/jobs/" + encodeURIComponent(session.jobId) + "/review", {
+      method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(patch), cache: "no-store"
+    }).then(function (r) {
+      if (r.status === 401) toLogin();
+      return r.text().then(function (t) {
+        var body = null;
+        try { body = t ? JSON.parse(t) : null; } catch (e) { body = null; }
+        if (!r.ok) throw new Error(errorMessage(r.status, body));
+        return body;
+      });
+    }, function () { throw new Error("нет связи с сервером"); }).then(function (job) {
+      session.inflight = false;
+      if (job && job.review) session.data = job.review;
+      if (live()) origins.forEach(function (o) { if (!session.origins[o]) rvSetIndicator(o, "saved"); });
+      rvFlush(session); // sends what accumulated meanwhile, or settles the waiters
+    }).catch(function (err) {
+      session.inflight = false;
+      session.sent = {}; // reviewer fields are re-sent with the retry
+      // Keep the failed changes; anything edited since then wins over them.
+      session.patch = mergePatch(patch, session.patch);
+      origins.forEach(function (o) { session.origins[o] = true; });
+      if (live()) Object.keys(session.origins).forEach(function (o) { rvSetIndicator(o, "error", err.message); });
+      rvSettle(session, true);
+    });
+  }
+
+  function rvSettle(session, failed) {
+    if (!failed && rvHasWork(session)) return;
+    var ws = session.waiters;
+    session.waiters = [];
+    ws.forEach(function (fn) { fn(!failed); });
+  }
+
+  /** Resolves once everything typed so far has been sent (true) or a save failed (false). */
+  function rvFlushNow() {
+    var session = rv;
+    return new Promise(function (resolve) {
+      session.waiters.push(resolve);
+      if (!session.inflight) rvFlush(session);
+    });
+  }
+
+  function rvSummary() {
+    if (!rv) return;
+    var m = rv.items.length, n = 0, conf = 0, rej = 0;
+    rv.items.forEach(function (it) {
+      var st = rvEntry(it.n).status;
+      if (st === "confirmed") { n++; conf++; } else if (st === "rejected") { n++; rej++; }
+    });
+    var u = rv.ui;
+    if (m) {
+      u.progressText.textContent = "Проверено " + n + " из " + m;
+      u.progressDetail.textContent = n ? "подтверждено " + conf + ", отклонено " + rej : "";
+      u.progressFill.style.width = Math.round((n / m) * 100) + "%";
+      u.progressBar.setAttribute("aria-valuenow", String(n));
+    } else {
+      u.progressText.textContent = "Автоматических срабатываний нет";
+      u.progressDetail.textContent = "подтвердите заключение «Нарушений нет»";
+    }
+    // Contradiction guard (a hint, never a block): decision vs confirmed violations.
+    var dec = rv.local.decision, warn = "";
+    if (dec === "rejected" && conf > 0) warn = "Выбрано «Нарушений нет», но подтверждено срабатываний: " + conf + ". Проверьте итоговое решение.";
+    else if (dec === "confirmed" && conf === 0) warn = "Выбрано «Нарушение подтверждено», но ни одно срабатывание не подтверждено. Проверьте итоговое решение.";
+    u.decisionWarn.textContent = warn;
+    u.decisionWarn.hidden = !warn;
+    var named = u.name.value.trim().length > 0;
+    u.actBtn.disabled = !named;
+    u.actHint.hidden = named;
+  }
+
+  function rvRenderDecision() {
+    var cur = rv.local.decision || null;
+    rv.ui.decisionBtns.forEach(function (b) {
+      var on = b.getAttribute("data-value") === cur;
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+      b.classList.toggle("is-on", on);
+    });
+  }
+
+  function rvRenderItem(it) {
+    var e = rvEntry(it.n), st = RV_STATUS[e.status] ? e.status : "pending";
+    it.chip.className = "rv-chip " + RV_STATUS[st].cls;
+    it.chip.textContent = RV_STATUS[st].text;
+    it.confirm.setAttribute("aria-pressed", st === "confirmed" ? "true" : "false");
+    it.reject.setAttribute("aria-pressed", st === "rejected" ? "true" : "false");
+    it.confirm.classList.toggle("is-on", st === "confirmed");
+    it.reject.classList.toggle("is-on", st === "rejected");
+    it.comment.placeholder = st === "rejected" ? "Причина отклонения" : "Комментарий проверяющего (необязательно)";
+    it.card.classList.toggle("vcard--confirmed", st === "confirmed");
+    it.card.classList.toggle("vcard--rejected", st === "rejected");
+  }
+
+  function rvSetStatus(it, status) {
+    var cur = rvEntry(it.n).status;
+    var next = cur === status ? "pending" : status; // clicking the active button returns to pending
+    var key = String(it.n);
+    rv.local.violations[key] = Object.assign({}, rvEntry(it.n), { status: next });
+    rvRenderItem(it);
+    rvSummary();
+    var p = { violations: {} };
+    p.violations[key] = { status: next };
+    rvQueue(p, key, false);
+    if (next === "rejected" && !it.comment.value.trim()) it.comment.focus();
+  }
+
+  function renderReview(job, vs) {
+    // A save still waiting on its debounce for the previous job is sent right away.
+    if (rv && rv.timer) rvFlush(rv);
+    var data = job.review && typeof job.review === "object" ? job.review : null;
+    rv = {
+      jobId: String(job.job_id || state.jobId), data: data,
+      local: { decision: data ? data.decision || null : null, violations: {} },
+      patch: {}, origins: {}, sent: {}, inflight: false, timer: null, waiters: [], items: [], ui: { ind: {} }
+    };
+    var dv = (data && data.violations) || {};
+    Object.keys(dv).forEach(function (k) { rv.local.violations[k] = Object.assign({}, dv[k]); });
+
+    var u = rv.ui;
+    var uid = "rv-" + Date.now().toString(36);
+    u.name = el("input", { type: "text", id: uid + "-name", class: "input", maxlength: "200", autocomplete: "name",
+      placeholder: "Фамилия И. О." });
+    u.pos = el("input", { type: "text", id: uid + "-pos", class: "input", maxlength: "200", autocomplete: "organization-title",
+      placeholder: "Например, специалист службы внутреннего контроля" });
+    u.name.value = data && data.reviewer_name ? data.reviewer_name : lsGet(LS_NAME);
+    u.pos.value = data && data.reviewer_position ? data.reviewer_position : lsGet(LS_POS);
+    [[u.name, "reviewer_name", LS_NAME], [u.pos, "reviewer_position", LS_POS]].forEach(function (f) {
+      f[0].addEventListener("input", function () {
+        lsSet(f[2], f[0].value.trim());
+        rvSummary();
+        var p = {};
+        p[f[1]] = f[0].value.trim();
+        rvQueue(p, "job", true);
+      });
+    });
+
+    u.decisionBtns = RV_DECISIONS.map(function (d) {
+      return el("button", { type: "button", class: "seg__btn seg__btn--" + d[0], "data-value": d[0], "aria-pressed": "false",
+        text: d[1], onclick: function () {
+          var next = rv.local.decision === d[0] ? null : d[0];
+          rv.local.decision = next;
+          rvRenderDecision();
+          rvSummary();
+          rvQueue({ decision: next }, "job", false);
+        } });
+    });
+    u.decisionComment = el("textarea", { class: "input rv-comment", rows: "2", maxlength: "2000", id: uid + "-dc",
+      placeholder: "Комментарий к решению (необязательно)" });
+    u.decisionComment.value = (data && data.decision_comment) || "";
+    u.decisionWarn = el("p", { class: "rv-warn", role: "status", hidden: true });
+    u.decisionComment.addEventListener("input", function () {
+      rvQueue({ decision_comment: u.decisionComment.value.trim() }, "job", true);
+    });
+
+    u.progressText = el("strong", { class: "rv-progress__text" });
+    u.progressDetail = el("span", { class: "rv-progress__detail" });
+    u.progressFill = el("span", { class: "rv-progress__fill" });
+    u.progressBar = el("span", { class: "rv-progress__bar", role: "progressbar", "aria-label": "Проверено срабатываний",
+      "aria-valuemin": "0", "aria-valuemax": String(vs.length), "aria-valuenow": "0" }, [u.progressFill]);
+    u.actBtn = el("button", { type: "button", class: "btn btn--primary", "aria-describedby": uid + "-acthint",
+      onclick: openAct }, [
+      icon("0 0 20 20", [["path", { d: "M5 2.5h7l3 3v12H5z M12 2.5v3h3 M7.5 9.5h5 M7.5 12.5h5 M7.5 15h3", fill: "none", stroke: "currentColor", "stroke-width": "1.5", "stroke-linejoin": "round" }]], "icon"),
+      "Сформировать акт"
+    ]);
+    u.actHint = el("span", { class: "rv-hint", id: uid + "-acthint", text: "Укажите ФИО проверяющего" });
+    u.ind.job = el("span", { class: "rv-save", role: "status", "aria-live": "polite" });
+
+    var panel = $("review-panel");
+    panel.textContent = "";
+    panel.hidden = false;
+    panel.appendChild(el("div", { class: "rv-head" }, [
+      el("div", null, [
+        el("h3", { class: "section-title", id: "review-title", text: "Проверка специалистом" }),
+        el("p", { class: "rv-lead", text: "Автоматический результат — подсказка для проверки. Подтвердите или отклоните каждое срабатывание и примите итоговое решение." })
+      ]),
+      u.ind.job
+    ]));
+    panel.appendChild(el("div", { class: "rv-progress" }, [
+      el("div", { class: "rv-progress__row" }, [u.progressText, u.progressDetail]),
+      vs.length ? u.progressBar : null
+    ]));
+    panel.appendChild(el("div", { class: "rv-fields" }, [
+      el("div", { class: "field" }, [el("label", { class: "field__label", for: uid + "-name", text: "ФИО проверяющего" }), u.name]),
+      el("div", { class: "field" }, [el("label", { class: "field__label", for: uid + "-pos", text: "Должность" }), u.pos])
+    ]));
+    panel.appendChild(el("div", { class: "field rv-decision" }, [
+      el("span", { class: "field__label", id: uid + "-dl", text: "Итоговое решение" }),
+      el("div", { class: "seg seg--decision", role: "group", "aria-labelledby": uid + "-dl" }, u.decisionBtns),
+      u.decisionWarn,
+      el("label", { class: "visually-hidden", for: uid + "-dc", text: "Комментарий к решению" }),
+      u.decisionComment
+    ]));
+    panel.appendChild(el("div", { class: "rv-actions" }, [
+      el("div", { class: "rv-actions__main" }, [u.actBtn, u.actHint]),
+      el("a", { class: "rv-export", href: API + "/feedback.jsonl", download: "feedback.jsonl",
+        title: "Размеченные решения проверяющих (JSONL) — данные для дообучения и настройки порогов",
+        text: "Выгрузить разметку (JSONL)" })
+    ]));
+
+    // Per-violation review rows (slots were placed by renderViolation).
+    vs.forEach(function (v, i) {
+      var n = v._n || i + 1;
+      var slot = document.querySelector('.rv-slot[data-n="' + n + '"]');
+      if (!slot) return;
+      var it = { n: n, card: slot.closest(".vcard") };
+      it.chip = el("span", { class: "rv-chip" });
+      it.confirm = el("button", { type: "button", class: "seg__btn seg__btn--confirm", "aria-pressed": "false",
+        onclick: function () { rvSetStatus(it, "confirmed"); } }, [ICONS.check(), "Подтвердить"]);
+      it.reject = el("button", { type: "button", class: "seg__btn seg__btn--reject", "aria-pressed": "false",
+        onclick: function () { rvSetStatus(it, "rejected"); } }, [
+        icon("0 0 24 24", [["path", { d: "M7 7l10 10M17 7L7 17", fill: "none", stroke: "currentColor", "stroke-width": "2.6", "stroke-linecap": "round" }]]),
+        "Отклонить"]);
+      it.comment = el("textarea", { class: "input rv-comment", rows: "2", maxlength: "2000",
+        "aria-label": "Комментарий проверяющего к нарушению " + n });
+      it.comment.value = rvEntry(n).comment || "";
+      it.comment.addEventListener("input", function () {
+        var key = String(n);
+        rv.local.violations[key] = Object.assign({}, rvEntry(n), { comment: it.comment.value });
+        var p = { violations: {} };
+        p.violations[key] = { comment: it.comment.value.trim() };
+        rvQueue(p, key, true);
+      });
+      rv.ui.ind[String(n)] = el("span", { class: "rv-save", role: "status", "aria-live": "polite" });
+      slot.className = "rv-slot review-row";
+      slot.appendChild(el("div", { class: "review-row__head" }, [
+        el("span", { class: "review-row__label", text: "Решение проверяющего" }), it.chip, rv.ui.ind[String(n)]
+      ]));
+      slot.appendChild(el("div", { class: "review-row__body" }, [
+        el("div", { class: "seg", role: "group", "aria-label": "Решение по нарушению " + n }, [it.confirm, it.reject]),
+        it.comment
+      ]));
+      rv.items.push(it);
+      rvRenderItem(it);
+    });
+    rvRenderDecision();
+    rvSummary();
+  }
+
+  function openAct() {
+    if (!rv || !rv.ui.name.value.trim()) return;
+    var url = new URL("act.html#job=" + encodeURIComponent(rv.jobId), location.href).href;
+    var session = rv;
+    var dirty = rvHasWork(session) ||
+      session.ui.name.value.trim() !== ((session.data && session.data.reviewer_name) || "") ||
+      session.ui.pos.value.trim() !== ((session.data && session.data.reviewer_position) || "");
+    if (!dirty) { window.open(url, "_blank", "noopener"); return; }
+    // Open the tab inside the click (popup blockers), point it at the act once the save landed.
+    var w = window.open("about:blank", "_blank");
+    rvFlushNow().then(function (ok) {
+      if (!ok) toast("Последние изменения не сохранены — акт сформирован по сохранённым данным");
+      if (w && !w.closed) { try { w.opener = null; } catch (e) { /* ignore */ } w.location.replace(url); }
+      else window.open(url, "_blank", "noopener");
+    });
+  }
+
   // ---------- Video + timeline ----------
   function effectiveDuration() {
     var d = num(video.duration);
@@ -770,7 +1150,7 @@
       var width = end !== null && end > t ? Math.min(100 - left, ((end - t) / d) * 100) : 0;
       var title = (v.title_ru || v.type || "Нарушение") + " · " + fmtTime(t);
       markers.appendChild(el("button", {
-        type: "button", class: "marker", "data-index": i, title: title, "aria-label": "Нарушение " + (i + 1) + ": " + title,
+        type: "button", class: "marker", "data-index": i, title: title, "aria-label": "Нарушение " + (v._n || i + 1) + ": " + title,
         style: "left:" + left + "%;" + (width ? "width:" + width + "%;transform:none;" : ""),
         onclick: function (e) { e.stopPropagation(); seekTo(t, true, true); highlightViolation(i, true); }
       }));
@@ -1020,6 +1400,8 @@
     $("history-table").hidden = jobs.length === 0;
     $("history-empty").hidden = jobs.length > 0;
     $("history-empty").textContent = "Проверок пока нет. Загрузите первое видео, чтобы начать.";
+    var navCount = $("nav-count");
+    if (navCount) navCount.textContent = String(jobs.length);
     jobs.forEach(function (job) {
       if (!job || !job.job_id) return;
       var id = String(job.job_id);
@@ -1081,9 +1463,71 @@
     });
   });
 
+  // ---------- Shell: rules shortcuts, service readiness (/healthz) ----------
+  document.querySelectorAll("[data-rules-open]").forEach(function (b) {
+    b.addEventListener("click", function () { $("rules-open").click(); });
+  });
+
+  var HEALTH_MS = 15000, HEALTH_TIMEOUT_MS = 6000, healthTimer = null, healthBusy = false;
+  function setReadiness(kind, title, text) {
+    var box = $("readiness");
+    if (!kind) { box.hidden = true; return; }
+    box.className = "readiness" + (kind === "warn" ? "" : " readiness--" + kind);
+    $("readiness-title").textContent = title;
+    $("readiness-text").textContent = text || "";
+    box.hidden = false;
+  }
+  function setServerStatus(kind, text) {
+    var pill = $("server-status");
+    pill.className = "server-status server-status--" + kind;
+    $("server-status-text").textContent = text;
+    pill.title = text;
+  }
+  function checkHealth() {
+    clearTimeout(healthTimer);
+    if (healthBusy) return;
+    healthBusy = true;
+    var ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    var killer = setTimeout(function () { if (ctrl) ctrl.abort(); }, HEALTH_TIMEOUT_MS);
+    fetch("/healthz", { headers: { Accept: "application/json" }, cache: "no-store", signal: ctrl ? ctrl.signal : undefined })
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (h) {
+        h = (h && typeof h === "object") ? h : {};
+        if (h.analyzer_ready === false) {
+          setServerStatus("warn", "Анализатор не готов");
+          var err = h.analyzer_error ? String(h.analyzer_error) : "модель ещё загружается";
+          setReadiness("warn", "Анализатор не готов", "Новые проверки начнутся после его запуска. Причина: " + err);
+        } else {
+          setServerStatus("ok", "Сервер работает");
+          if (h.vlm_ok === false) {
+            setReadiness("info", "Локальная VLM-модель недоступна",
+              "Проверки выполняются, но часть правил проверяется только детектором.");
+          } else {
+            setReadiness(null);
+          }
+        }
+      })
+      .catch(function () {
+        setServerStatus("down", "Нет связи с сервером");
+        setReadiness("down", "Сервер недоступен",
+          "Не удалось связаться с сервисом. Проверьте, что он запущен, — страница переподключится автоматически.");
+      })
+      .then(function () {
+        clearTimeout(killer);
+        healthBusy = false;
+        healthTimer = setTimeout(checkHealth, HEALTH_MS);
+      });
+  }
+  $("readiness-retry").addEventListener("click", checkHealth);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) checkHealth(); });
+
   // ---------- Init ----------
   renderFile();
   show("upload");
   route();
   refreshHistory();
+  checkHealth();
 })();

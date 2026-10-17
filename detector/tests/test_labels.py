@@ -68,7 +68,7 @@ def test_committed_labels_json():
     assert len(labels) == 42
     assert sum(v["violation"] for v in labels.values()) == 22
     for vid, v in labels.items():
-        assert set(v) == {"file", "violation", "label_sec", "hyp_types", "duration_sec"}
+        assert set(v) == {"file", "violation", "label_sec", "hyp_types", "team_types", "duration_sec"}
         assert v["file"].endswith(".mov")
         assert normalize_id(v["file"]) == vid
         assert v["duration_sec"] > 0
@@ -77,6 +77,8 @@ def test_committed_labels_json():
             assert v["hyp_types"] == HYP_TYPES[vid]
         else:
             assert v["label_sec"] == [] and v["hyp_types"] == []
+    assert all(labels[v]["team_types"] == ["T15"] and not labels[v]["violation"] for v in ("X-19", "X-35", "X-37", "X-39"))
+    assert labels["X-11"]["hyp_types"] == ["T4", "T3"] and labels["X-13"]["hyp_types"] == ["T8"]
     assert labels["X-4"]["label_sec"] == labels["X-47"]["label_sec"] == [57.0, 68.0]
     assert labels["X-15"]["file"] == "Х-15.mov"  # original Cyrillic filename kept
     assert labels["X-1"]["file"] == "X-1.mov"

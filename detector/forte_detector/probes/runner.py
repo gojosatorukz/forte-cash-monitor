@@ -139,6 +139,16 @@ def door_events(timeline: dict, roi) -> list[float]:
     return sorted(ev)
 
 
+def _lighting_ok(img, ref) -> bool:
+    ratio = cheap.global_brightness(img) / max(cheap.global_brightness(ref), 1.0)
+    return 1 - DOOR_ILLUM_MAX_SHIFT <= ratio <= 1 / (1 - DOOR_ILLUM_MAX_SHIFT)
+
+
+def _same_lighting(imgs, ref) -> list[int]:
+    """Indices of imgs lit like ref (whole-frame brightness within DOOR_ILLUM_MAX_SHIFT)."""
+    return [i for i, im in enumerate(imgs) if _lighting_ok(im, ref)]
+
+
 def door_reference(read: Callable[[float], np.ndarray], timeline: dict, roi) -> dict:
     """Closed-door reference: consensus over clean samples instead of "the first clear frame".
 
@@ -168,8 +178,12 @@ def door_reference(read: Callable[[float], np.ndarray], timeline: dict, roi) -> 
     if len(pool) > DOOR_REF_CANDIDATES:
         idx = np.linspace(0, len(pool) - 1, DOOR_REF_CANDIDATES).round().astype(int)
         pool = [pool[i] for i in sorted(set(idx.tolist()))]
-    n = len(pool)
     imgs = [read(t) for t in pool]
+    # lighting guard: frames after a lights-off/on (whole-frame brightness off by > 30 % from the
+    # earliest candidate) form spurious "door states" -> not candidates
+    keep = _same_lighting(imgs, imgs[0])
+    pool, imgs = [pool[i] for i in keep], [imgs[i] for i in keep]
+    n = len(pool)
     D = np.zeros((n, n))
     for i in range(n):
         for j in range(i + 1, n):
@@ -219,6 +233,31 @@ def _zone_cover(zone, box) -> float:
     return ix * iy / max((zone[2] - zone[0]) * (zone[3] - zone[1]), 1e-9)
 
 
+DOOR_PERSON_MIN_H = 0.6  # a person "in the doorway" is at least this tall relative to the cashier standing height
+DOOR_ILLUM_MAX_SHIFT = 0.3  # whole-frame brightness change vs the reference beyond which door CV abstains
+DOOR_PERSON_IN_ROI = 0.3  # ... with at least this share of the box over the door leaf (X-33: 0.41 at the
+# handle edge while stepping in; X-32: 1.0)
+
+
+def _in_roi(box, roi) -> float:
+    """Fraction of `box` lying inside `roi`."""
+    ix = max(0.0, min(box[2], roi[2]) - max(box[0], roi[0]))
+    iy = max(0.0, min(box[3], roi[3]) - max(box[1], roi[1]))
+    a = max((box[2] - box[0]) * (box[3] - box[1]), 1e-9)
+    return ix * iy / a
+
+
+def cashier_height(timeline: dict) -> float:
+    """Cashier's standing height (normalized): 75th percentile of the cashier-role box heights;
+    else the seat box height; else 0.2 of the frame."""
+    hs = [p[2][3] - p[2][1] for row in ((timeline.get("series") or {}).get("persons") or [])
+          for p in row if len(p) > 2 and p[1] == "cashier"]
+    if len(hs) >= 5:
+        return float(np.percentile(hs, 75))
+    seat = (timeline.get("zones") or {}).get("seat")
+    return float(seat[3] - seat[1]) if seat else 0.2
+
+
 def _transition_gap(read, timeline, roi, pool, label, imgs, occ, events):
     """Ambiguity guard for a minority earliest cluster: (gap, explained_by | None).
 
@@ -226,9 +265,12 @@ def _transition_gap(read, timeline, roi, pool, label, imgs, occ, events):
     state is a minority, trust it only if the first state change is pinned to a short gap
     (<= DOOR_GAP_MAX) and someone really used the door in it. The pool is sparse (<= 10 candidates),
     so the gap is first narrowed with the frames between the two candidates (each compared with both
-    sides). Door use = a door event whose activity window overlaps the gap, or a person box covering
-    >= DOOR_ZONE_PRESENCE of the doorway zone (no zone: occluding >= DOOR_REF_MAX_OCCLUSION of the
-    ROI) in a gap sample - not any overlap of the padded ROI (someone behind the glass).
+    sides; frames lit differently from the earlier side are skipped). Door use = a door event whose
+    activity window overlaps the gap, or in a gap sample: with a trusted doorway zone (>= 3 points) a
+    person box covering >= DOOR_ZONE_PRESENCE of it; without one, a person occluding >=
+    DOOR_REF_MAX_OCCLUSION of the leaf ROI, or a full-size person (height >= DOOR_PERSON_MIN_H x the
+    cashier's standing height) with >= DOOR_PERSON_IN_ROI of the box over the (leaf-side) ROI - not
+    any overlap of the padded ROI (someone behind the glass).
 
     Residual limit: door use is direction-blind (it explains open->closed as well as closed->open);
     this only guarantees the change is tied to a real, local door use, and the time prior picks the
@@ -245,6 +287,8 @@ def _transition_gap(read, timeline, roi, pool, label, imgs, occ, events):
     side = []
     for t in inner:
         img = read(t)
+        if not _lighting_ok(img, imgs[i0]):  # lights switched in the gap: no state evidence
+            continue
         d = []
         for j in (i0, nxt):
             persons = cheap.persons_at(timeline, t) + cheap.persons_at(timeline, pool[j])
@@ -267,7 +311,11 @@ def _transition_gap(read, timeline, roi, pool, label, imgs, occ, events):
     for e in events:
         if e + lo <= b and e + hi >= a:
             return gap, f"event@{round(e, 3)}"
-    zone = (timeline.get("zones") or {}).get("door")
+    zones = timeline.get("zones") or {}
+    # same trust rule as door_roi(): a doorway zone from 1-2 births/deaths may be somewhere else
+    dp = zones.get("door_points")  # None (older timelines / synthetic) = trusted
+    zone = zones.get("door") if (dp is None or dp >= DOOR_ZONE_MIN_POINTS) else None
+    h_ref = cashier_height(timeline)
     for t in ts:
         if not (a + lo <= t <= b - lo):
             continue
@@ -275,10 +323,195 @@ def _transition_gap(read, timeline, roi, pool, label, imgs, occ, events):
         if zone is not None:
             hit = any(_zone_cover(zone, bx) >= DOOR_ZONE_PRESENCE for bx in boxes)
         else:
-            hit = occ.get(t, 0.0) >= DOOR_REF_MAX_OCCLUSION
+            # no doorway zone (X-32 at HEAD): a full-size person over the door leaf is crossing the
+            # doorway (the cashier walks in at 2.5-4.3 s, box in the leaf ROI but covering only ~0.2
+            # of it). "Full-size" is relative to the cashier's own standing height, not to the ROI,
+            # so small figures behind the glass fail whatever the ROI size
+            hit = occ.get(t, 0.0) >= DOOR_REF_MAX_OCCLUSION or any(
+                _in_roi(bx, roi) >= DOOR_PERSON_IN_ROI and (bx[3] - bx[1]) >= DOOR_PERSON_MIN_H * h_ref
+                for bx in boxes)
         if hit:
             return gap, f"person@{round(t, 3)}"
     return gap, None
+
+
+# ----------------------------------------------------------------------------- desk ROI
+
+DESK_MIN_AREA = 0.08  # floor on the desk ROI area (fraction of the frame), also >= the seat box
+CLOSE_UP_MAX_AREA = 0.2  # ROIs larger than this get the neutral (full-frame) prompt, not "close-up"
+
+
+def _area(b) -> float:
+    return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+
+def _gap(a, b) -> float:
+    """Largest axis gap between two boxes (0 when they overlap on that axis)."""
+    gx = max(0.0, max(a[0], b[0]) - min(a[2], b[2]))
+    gy = max(0.0, max(a[1], b[1]) - min(a[3], b[3]))
+    return max(gx, gy)
+
+
+def plausible_machine(lap, cm) -> bool:
+    """A counting machine sits on the same desk as the laptop and is of comparable size; an
+    open-vocab "black machine" far away or huge/tiny (monitor, printer, safe) is rejected."""
+    if not lap or not cm:
+        return False
+    lw = lap[2] - lap[0]
+    ratio = _area(cm) / max(_area(lap), 1e-6)
+    return _gap(lap, cm) < 2.5 * lw and 0.15 <= ratio <= 3.0  # opposite desk ends: ~1.5-2.1 lw (X-38, X-16, X-4)
+
+
+def _coco_laptop_video(timeline: dict):
+    """Median box of strong COCO laptop detections over the whole video (None if < 3)."""
+    ser = timeline.get("series") or {}
+    boxes = [o[1:5] for row in (ser.get("objects") or []) for o in row if o[0] == "laptop" and o[5] >= 0.6]
+    if len(boxes) < 3:
+        return None
+    return [float(v) for v in np.median(np.asarray(boxes, float), axis=0)]
+
+
+def desk_roi(lap, cm, coco_lap, ov_desk, seat) -> tuple[list[float] | None, str | None]:
+    """Cash work-surface ROI (normalized) and its source.
+
+    Order: union of laptop + counting machine (machine only if plausible next to the laptop) ->
+    one padded anchor object (laptop, machine, or the COCO laptop from the timeline) -> the
+    open-vocab desk box only if it is near the cashier seat -> None (caller uses the full frame).
+    Anchored boxes are padded, extended toward the seat (items lie between the cashier and the
+    equipment; on low/oblique views in front of the laptop) and grown to a minimum area.
+    """
+    if lap and cm and plausible_machine(lap, cm):
+        u = [min(lap[0], cm[0]), min(lap[1], cm[1]), max(lap[2], cm[2]), max(lap[3], cm[3])]
+        w, h = u[2] - u[0], u[3] - u[1]
+        box, src = [u[0] - 0.1 * w, u[1] - 0.5 * h, u[2] + 0.1 * w, u[3] + 0.5 * h], "laptop+counting_machine"
+    else:
+        anchor, src = ((lap, "laptop") if lap else (cm, "counting_machine") if cm
+                       else (coco_lap, "coco_laptop") if coco_lap else (None, None))
+        if anchor is None:
+            if ov_desk and seat:
+                sc = ((seat[0] + seat[2]) / 2, (seat[1] + seat[3]) / 2)
+                dc = ((ov_desk[0] + ov_desk[2]) / 2, (ov_desk[1] + ov_desk[3]) / 2)
+                sd = float(np.hypot(seat[2] - seat[0], seat[3] - seat[1]))
+                if float(np.hypot(sc[0] - dc[0], sc[1] - dc[1])) <= 1.5 * sd:
+                    return [round(float(v), 4) for v in ov_desk], "openvocab_near_seat"
+            return None, None
+        w, h = anchor[2] - anchor[0], anchor[3] - anchor[1]
+        box = [anchor[0] - 1.0 * w, anchor[1] - 0.75 * h, anchor[2] + 1.0 * w, anchor[3] + 0.75 * h]
+    if seat:  # extend toward the seat centre, halfway
+        sx, sy = (seat[0] + seat[2]) / 2, (seat[1] + seat[3]) / 2
+        box[0] = min(box[0], box[0] + 0.5 * (sx - box[0])) if sx < box[0] else box[0]
+        box[2] = max(box[2], box[2] + 0.5 * (sx - box[2])) if sx > box[2] else box[2]
+        box[1] = min(box[1], box[1] + 0.5 * (sy - box[1])) if sy < box[1] else box[1]
+        box[3] = max(box[3], box[3] + 0.5 * (sy - box[3])) if sy > box[3] else box[3]
+    min_area = max(DESK_MIN_AREA, _area(seat) if seat else 0.0)
+    a = _area(box)
+    if a < min_area:  # grow about the centre
+        k = float(np.sqrt(min_area / max(a, 1e-6)))
+        cx, cy, w, h = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2, box[2] - box[0], box[3] - box[1]
+        box = [cx - k * w / 2, cy - k * h / 2, cx + k * w / 2, cy + k * h / 2]
+    box = [max(0.0, box[0]), max(0.0, box[1]), min(1.0, box[2]), min(1.0, box[3])]
+    return [round(float(v), 4) for v in box], src
+
+
+# ----------------------------------------------------------------------------- door ROI
+
+DOOR_ZONE_MIN_POINTS = 3  # a doorway zone from fewer births/deaths is a guess (one track can be anything)
+DOOR_ROI_MIN_H = 0.1  # a door-leaf ROI thinner than this (fraction of frame height) is degenerate
+
+
+def door_roi(zone, door_points: int | None, ov_door, seat) -> tuple[list[float] | None, str | None]:
+    """Door-leaf ROI (normalized) and its source.
+
+    1. doorway zone from >= 3 track births/deaths -> door_roi_from_zone (person-sized box at the door);
+    2. open-vocab box: a large one ("glass door") is used as is (width-capped); a small one is the
+       handle -> a person-sized pseudo zone centred on it (size of the seat box, the cashier's
+       box) -> door_roi_from_zone. Padding the handle box itself gives a ~0.03-high strip that
+       misses the door leaf (X-32 after perception rounds 4-5: no door zone, ROI 0.03 high).
+    3. doorway zone from 1-2 points; 4. None.
+    Any result thinner than DOOR_ROI_MIN_H is rebuilt as a person-sized pseudo zone around its centre.
+    """
+    def person_zone(c):
+        if seat:
+            w, h = seat[2] - seat[0], seat[3] - seat[1]
+        else:
+            w, h = 0.12, 0.2
+        return [c[0] - w / 2, c[1] - h / 2, c[0] + w / 2, c[1] + h / 2]
+
+    def centre(b):
+        return ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+
+    if zone and (door_points is None or door_points >= DOOR_ZONE_MIN_POINTS):
+        roi, src = cheap.door_roi_from_zone(zone), "timeline"
+    elif ov_door:
+        if _area(ov_door) >= 0.03:
+            cx = centre(ov_door)[0]
+            half = min((ov_door[2] - ov_door[0]) / 2, 0.225)
+            roi, src = [cx - half, ov_door[1], cx + half, ov_door[3]], "openvocab"
+        else:
+            roi, src = cheap.door_roi_from_zone(person_zone(centre(ov_door))), "openvocab_handle"
+    elif zone:
+        roi, src = cheap.door_roi_from_zone(zone), "timeline_weak"
+    else:
+        return None, None
+    if roi[3] - roi[1] < DOOR_ROI_MIN_H:
+        roi, src = cheap.door_roi_from_zone(person_zone(centre(roi))), f"{src}+min_height"
+    roi = [max(0.0, roi[0]), max(0.0, roi[1]), min(1.0, roi[2]), min(1.0, roi[3])]
+    return [round(float(v), 4) for v in roi], src
+
+
+def _door_activity(read, timeline, roi, n: int = 8) -> float:
+    """Largest pairwise door_state change over n low-occupancy frames spread over the video: how much
+    this ROI's appearance varies (a moving door leaf varies, a wall or desk does not)."""
+    ts = [float(t) for t in ((timeline.get("series") or {}).get("t") or [0.0])]
+    ok = [t for t in ts if _overlap_frac(roi, cheap.persons_at(timeline, t)) <= DOOR_REF_MAX_OCCLUSION] or ts[:1]
+    if len(ok) > n:
+        ok = [ok[i] for i in sorted(set(np.linspace(0, len(ok) - 1, n).round().astype(int).tolist()))]
+    imgs = [read(t) for t in ok]
+    # lighting guard: compare only frames lit like the first one (a lights-off would make any
+    # half "move"); `ok` is already filtered for persons occluding THIS half
+    keep = _same_lighting(imgs, imgs[0])
+    ok, imgs = [ok[i] for i in keep], [imgs[i] for i in keep]
+    best = 0.0
+    for i in range(len(ok)):
+        for j in range(i + 1, len(ok)):
+            persons = cheap.persons_at(timeline, ok[i]) + cheap.persons_at(timeline, ok[j])
+            v, _, raw = cheap.door_state(imgs[i], imgs[j], roi, persons)
+            if v is not None:
+                best = max(best, raw.get("change_frac", 0.0))
+    return best
+
+
+def pick_leaf_side(read, timeline, roi, handle) -> tuple[list[float], str]:
+    """A handle-centred ROI spans both sides of the handle, but the leaf (hinged on one side) lies on
+    only one of them; the other half (wall, desk, cashier area) dilutes the change and the open and
+    closed states blur into one cluster (X-33 in full.analyze). Keep the half whose appearance varies
+    most over the video; keep the full ROI when neither varies (door never moves) or they tie."""
+    hx = (handle[0] + handle[2]) / 2
+    left = [roi[0], roi[1], hx, roi[3]]
+    right = [hx, roi[1], roi[2], roi[3]]
+    if left[2] - left[0] < 0.05 or right[2] - right[0] < 0.05:
+        return roi, "both"
+    al, ar = _door_activity(read, timeline, left), _door_activity(read, timeline, right)
+    if max(al, ar) <= cheap.DOOR_THR or abs(al - ar) < 0.25 * max(al, ar):
+        return roi, "both"
+    return ([round(v, 4) for v in left], "left") if al > ar else ([round(v, 4) for v in right], "right")
+
+
+DOOR_ROI_VERSION = 3  # bump when the door ROI chain changes: older calibrations get it recomputed
+
+
+def select_door_roi(read, timeline: dict, ov_door) -> tuple[list[float] | None, str | None, str | None]:
+    """The full door ROI chain: door_roi() source selection, then the leaf-side choice for a
+    handle-centred ROI. Returns (roi, source, leaf_side)."""
+    zones = timeline.get("zones") or {}
+    roi, src = door_roi(zones.get("door"), zones.get("door_points"), ov_door, zones.get("seat"))
+    side = None
+    if roi is not None and src and src.startswith("openvocab_handle"):
+        try:
+            roi, side = pick_leaf_side(read, timeline, roi, ov_door)
+        except Exception as e:  # noqa: BLE001
+            log.warning("door leaf side failed: %s", e)
+    return roi, src, side
 
 
 # ----------------------------------------------------------------------------- calibration
@@ -303,13 +536,12 @@ def calibrate(video_path: str, timeline: dict, transform: Callable[[Any], Any] |
     # door" often picks the fixed glass panel), open-vocab box only as a fallback
     ov_door = cal.get("door")
     cal["door_openvocab"] = ov_door
-    if ov_door is not None and (ov_door[2] - ov_door[0]) * (ov_door[3] - ov_door[1]) < 0.03:
-        cal["door"] = [round(v, 4) for v in cheap.door_roi_from_zone(ov_door)]  # small box = the handle
-    cal["meta"]["door_source"] = "openvocab" if cal.get("door") else None
-    zone = (timeline.get("zones") or {}).get("door")
-    if zone:
-        cal["door"] = [round(v, 4) for v in cheap.door_roi_from_zone(zone)]
-        cal["meta"]["door_source"] = "timeline"
+    cal["door"], cal["meta"]["door_source"], cal["meta"]["door_leaf_side"] = select_door_roi(read, timeline, ov_door)
+    cal["meta"]["door_roi_version"] = DOOR_ROI_VERSION
+    cal["desk_openvocab"] = cal.get("desk")
+    seat = (timeline.get("zones") or {}).get("seat")
+    cal["desk"], cal["meta"]["desk_source"] = desk_roi(
+        cal.get("laptop"), cal.get("counting_machine"), _coco_laptop_video(timeline), cal["desk_openvocab"], seat)
     cal["door_ref"] = None
     if cal.get("door"):
         try:
@@ -341,6 +573,17 @@ def _crop(img: np.ndarray, roi, margin: float, min_side: int) -> np.ndarray:
     return np.ascontiguousarray(c)
 
 
+def autocontrast(img: np.ndarray, lo: float = 1.0, hi: float = 99.0) -> np.ndarray:
+    """Linear stretch of the crop's lo..hi luminance percentiles to 0..255 (same gain on all
+    channels, so colours keep their hue). A no-op on already full-range crops."""
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    a, b = np.percentile(g, [lo, hi])
+    if b - a < 8 or (a <= 2 and b >= 253):
+        return img
+    out = (img.astype(np.float32) - a) * (255.0 / (b - a))
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def _full(img: np.ndarray) -> np.ndarray:
     h, w = img.shape[:2]
     s = vlm_max_side() / max(h, w)
@@ -369,6 +612,7 @@ class _Ctx:
         self._cal = calibration
         self.frame = _Frames(video_path, transform)
         self._refs: dict[tuple, dict] = {}
+        self._door_roi: list | None = None  # [roi] once computed in this call
         self.t0 = time.perf_counter()
         self.vlm_s = 0.0
 
@@ -379,10 +623,16 @@ class _Ctx:
         return self._cal
 
     def roi(self, key: str, t: float):
-        if key == "door":  # data-derived doorway (track births/deaths) beats open-vocab "glass door"
-            zone = (self.timeline.get("zones") or {}).get("door")
-            if zone:
-                return cheap.door_roi_from_zone(zone)
+        if key == "door":
+            cal = self._cal
+            if cal is not None and cal.get("door") and (cal.get("meta") or {}).get("door_roi_version") == DOOR_ROI_VERSION:
+                return cal["door"]  # calibrate() already ran the current chain
+            if self._door_roi is None:  # once per call: same ROI -> one cached reference
+                ov = (self.cal or {}).get("door_openvocab")
+                roi = select_door_roi(self.frame, self.timeline, ov)[0]
+                # nothing better from the current chain: keep a caller-supplied / older door box
+                self._door_roi = [roi if roi is not None else (cal or {}).get("door")]
+            return self._door_roi[0]
         box = (self.cal or {}).get(key)
         if box is None and key == "laptop":
             box = _coco_laptop(self.timeline, t)
@@ -410,7 +660,15 @@ def _probe_door(ctx: _Ctx, req: ProbeRequest) -> ProbeResult:
     ts = [req.t] + list(req.extra_ts[:2])
     for t in ts:
         persons = cheap.persons_at(ctx.timeline, t) + cheap.persons_at(ctx.timeline, ref_t)
-        v, c, raw = cheap.door_state(ctx.frame(t), ref, roi, persons)
+        img = ctx.frame(t)
+        ratio = cheap.global_brightness(img) / max(cheap.global_brightness(ref), 1.0)
+        if not (1 - DOOR_ILLUM_MAX_SHIFT <= ratio <= 1 / (1 - DOOR_ILLUM_MAX_SHIFT)):
+            # room lights switched off/on (X-11, clean X-12): the leaf's appearance change is
+            # dominated by the lighting, not by the door -> undecidable for this frame
+            v, c, raw = None, 0.0, {"why": "illumination_change", "brightness_ratio": round(ratio, 3)}
+        else:
+            v, c, raw = cheap.door_state(img, ref, roi, persons)
+            raw["brightness_ratio"] = round(ratio, 3)
         votes.append((v, c))
         raws.append({"t": t, **raw})
     base = {"ref_t": ref_t, "ref_why": ref_info.get("why"), "ref_candidates": ref_info.get("candidates"),
@@ -447,8 +705,11 @@ def _probe_vlm(ctx: _Ctx, req: ProbeRequest) -> ProbeResult:
     else:
         roi = req.roi or (ctx.roi(spec.roi, req.t) if spec.roi else None)
         imgs = [(_crop(ctx.frame(t), roi, spec.margin, spec.min_side) if roi else _full(ctx.frame(t))) for t in ts]
+        if spec.autocontrast and roi is not None:
+            imgs = [autocontrast(im) for im in imgs]
         labels = questions.frame_labels(ts) if len(ts) > 1 else None
-        close_up = roi is not None and not _is_large(roi, spec.margin)
+        # close-up wording only for genuinely small crops; 0.2-0.5 of the frame gets the neutral prompt
+        close_up = roi is not None and _area(cheap.expand(roi, spec.margin)) < CLOSE_UP_MAX_AREA
         base = spec.prompt if (close_up or not spec.full_prompt) else spec.full_prompt
         prompt = base + (questions.MULTI_SUFFIX if len(ts) > 1 else "")
         client = get_client()

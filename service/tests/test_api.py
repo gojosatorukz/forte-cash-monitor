@@ -20,13 +20,15 @@ from app.rules import BUNDLED_RULES_PATH
 
 KEY = "test-key"
 HDR = {"X-API-Key": KEY}
+UI_PASS = "test-ui-pass"
 TINY_JPEG = base64.b64encode(b"\xff\xd8\xff\xe0fake").decode()
 
 
 def make_settings(tmp_path: Path, **kw) -> Settings:
     # Pinned to the bundled rules so tests don't depend on ../detector or ../docs files.
     base = dict(api_key=KEY, api_key_is_default=False, data_dir=tmp_path / "data",
-                job_timeout_sec=30.0, stub_debug=False, rules_path=str(BUNDLED_RULES_PATH))
+                job_timeout_sec=30.0, stub_debug=False, rules_path=str(BUNDLED_RULES_PATH),
+                ui_password=UI_PASS)
     if "analyzer_path_override" in kw:
         kw["analyzer"] = kw.pop("analyzer_path_override")
     base.update(kw)
@@ -34,9 +36,13 @@ def make_settings(tmp_path: Path, **kw) -> Settings:
 
 
 @contextlib.contextmanager
-def client_for(tmp_path: Path, analyzer=None, **kw):
+def client_for(tmp_path: Path, analyzer=None, login=True, **kw):
+    """TestClient for the app; `login=True` signs in through the UI gate (session cookie kept by the client)."""
     app = create_app(make_settings(tmp_path, **kw), analyzer=analyzer)
     with TestClient(app) as c:
+        if login:
+            r = c.post("/login", data={"password": UI_PASS}, follow_redirects=False)
+            assert r.status_code == 303, r.text
         yield c
 
 

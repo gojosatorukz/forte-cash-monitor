@@ -414,9 +414,10 @@ def test_calibrate_normalized_boxes_and_nulls(frames, monkeypatch):
     cal = runner.calibrate("v.mov", TL, detector=ov)
     assert cal["safe"] == pytest.approx([0.7, 0.2, 0.9, 0.5], abs=1e-3)
     assert cal["laptop"] == pytest.approx([0.5, 0.4, 0.6, 0.45], abs=1e-3)
-    assert cal["counting_machine"] is None and cal["desk"] is None
+    assert cal["counting_machine"] is None and cal["desk_openvocab"] is None
+    assert cal["desk"] is not None and cal["meta"]["desk_source"] == "laptop"  # single padded anchor
     assert "door" in cal  # from OV or timeline fallback (here: timeline door zone)
-    assert cal["door"] is not None and cal["meta"]["door_source"] == "timeline"
+    assert cal["door"] is not None and cal["meta"]["door_source"].startswith("timeline")
     assert 1 <= ov.calls <= 3
     assert cal["scores"]["safe"] == pytest.approx(0.6)
     assert cal["door_ref"] is not None and cal["door_ref"]["roi"] == cal["door"]
@@ -909,3 +910,213 @@ def test_runner_passes_deadline_to_the_vlm_client(frames, monkeypatch):
     dl = time.monotonic() + 100
     runner.run_probes("v.mov", [ProbeRequest("id_document_shown", 5.0)], timeline=TL, deadline=dl)
     assert fake.deadlines == [dl]
+
+
+# ----------------------------------------------------------------------------- desk ROI (review of 65753b3)
+
+LAP = [0.50, 0.40, 0.65, 0.46]
+CM = [0.20, 0.42, 0.33, 0.50]
+SEAT = [0.35, 0.30, 0.55, 0.45]
+
+
+def test_desk_roi_union_of_plausible_laptop_and_machine():
+    box, src = runner.desk_roi(LAP, CM, None, None, SEAT)
+    assert src == "laptop+counting_machine"
+    assert box[0] <= CM[0] and box[2] >= LAP[2] and box[1] <= LAP[1] and box[3] >= CM[3]
+
+
+def test_desk_roi_rejects_implausible_machine():
+    far = [0.85, 0.92, 0.98, 0.99]  # "black machine" far from the laptop (printer / monitor / safe)
+    huge = [0.0, 0.3, 0.45, 0.7]  # far bigger than the laptop
+    for cm in (far, huge):
+        assert not runner.plausible_machine(LAP, cm)
+        box, src = runner.desk_roi(LAP, cm, None, None, SEAT)
+        assert src == "laptop"
+        assert box[3] < 0.85  # does not stretch to the bogus machine
+
+
+def test_desk_roi_fallback_order():
+    assert runner.desk_roi(None, CM, None, None, SEAT)[1] == "counting_machine"
+    assert runner.desk_roi(None, None, LAP, None, SEAT)[1] == "coco_laptop"
+    near = [0.30, 0.35, 0.60, 0.55]
+    far = [0.0, 0.75, 0.9, 1.0]  # big foreground table away from the cashier
+    assert runner.desk_roi(None, None, None, near, SEAT) == (near, "openvocab_near_seat")
+    assert runner.desk_roi(None, None, None, far, SEAT) == (None, None)
+    assert runner.desk_roi(None, None, None, near, None) == (None, None)
+
+
+def test_desk_roi_extends_toward_the_seat_and_has_min_area():
+    seat_below = [0.40, 0.60, 0.60, 0.90]  # cashier in front of the equipment (back to camera)
+    box, _ = runner.desk_roi(LAP, CM, None, None, seat_below)
+    sym, _ = runner.desk_roi(LAP, CM, None, None, None)
+    assert box[3] > sym[3] + 0.05 and abs(box[1] - sym[1]) < 1e-6  # grows toward the seat only
+    tiny = [0.50, 0.40, 0.52, 0.41]
+    box, _ = runner.desk_roi(tiny, None, None, None, None)
+    assert runner._area(box) >= runner.DESK_MIN_AREA - 1e-3
+    box, _ = runner.desk_roi(tiny, None, None, None, [0.2, 0.2, 0.6, 0.6])
+    assert runner._area(box) >= 0.16 - 1e-3  # at least the seat-box size
+
+
+def test_mid_size_desk_roi_gets_neutral_prompt(frames, monkeypatch):
+    fake = FakeVLM()
+    monkeypatch.setattr(runner, "get_client", lambda: fake)
+    runner.run_probes("v.mov", [ProbeRequest("cash_on_desk", 1.0)], timeline=TL,
+                      calibration={"desk": [0.1, 0.3, 0.7, 0.8]})  # ~0.3 of the frame
+    (_, _, prompt, _), = fake.calls
+    assert prompt == questions.SPECS["cash_on_desk"].full_prompt
+
+
+def test_cash_prompt_excludes_notes_in_the_machine_and_is_not_site_specific():
+    p = questions.SPECS["cash_on_desk"].prompt.lower()
+    assert "inside the counting machine" in p and "wooden" not in p
+    assert "white" not in questions.SPECS["id_document_shown"].prompt.lower()
+    assert "green screen" not in questions.SPECS["phone_visible"].prompt.lower()
+
+
+def _x32_like(person_box):
+    tl = _door_tl(20)
+    tl["zones"]["door"] = None  # perception produced no doorway zone (X-32 at HEAD)
+    for t in (2, 3):
+        tl["series"]["persons"][t] = [[1, "cashier", person_box]]
+    return tl
+
+
+def test_door_explained_by_full_size_person_inside_the_roi(monkeypatch):
+    # X-32: closed at 0-1 s, cashier walks through the doorway at 2-3 s (box inside the door ROI but
+    # covering only ~0.2 of it), door open from 4 s to the end (majority) -> trusted, decides "open"
+    monkeypatch.setattr(runner, "read_frame_at", _door_reader({float(i) for i in range(4, 20)}))
+    cal = {"door": [0.0, 0.0, 0.45, 0.6]}
+    res = runner.run_probes("v.mov", [ProbeRequest("door_open", 15.0), ProbeRequest("door_open", 0.0)],
+                            timeline=_x32_like([0.15, 0.15, 0.3, 0.5]), calibration=cal)
+    assert [r.value for r in res] == [True, False]
+    assert res[0].raw["ref_explained_by"].startswith("person@")
+
+
+def test_door_small_figure_behind_glass_does_not_explain(monkeypatch):
+    monkeypatch.setattr(runner, "read_frame_at", _door_reader({float(i) for i in range(4, 20)}))
+    cal = {"door": [0.0, 0.0, 0.45, 0.6]}
+    res = runner.run_probes("v.mov", [ProbeRequest("door_open", 15.0)],
+                            timeline=_x32_like([0.2, 0.05, 0.23, 0.1]), calibration=cal)
+    assert res[0].value is None
+
+
+def test_door_abstains_on_global_lights_off(monkeypatch):
+    # clean X-12 pattern: door closed throughout, room lights switched off from t=7 (whole frame much
+    # darker, non-linear) -> no "open" from the lighting change; frames before stay decidable
+    def read(path, t, transform=None):
+        img = _scene(7)
+        if t >= 7:
+            img = (img.astype(np.float32) * 0.35 + 10).astype(np.uint8)
+            img[:, :80] = (img[:, :80].astype(np.float32) * 0.5).astype(np.uint8)  # uneven: not pure scaling
+        return img
+
+    monkeypatch.setattr(runner, "read_frame_at", read)
+    res = runner.run_probes("v.mov", [ProbeRequest("door_open", 8.0), ProbeRequest("door_open", 9.0),
+                                      ProbeRequest("door_open", 3.0)], timeline=_door_tl(10), calibration={})
+    assert [r.value for r in res] == [None, None, False]
+    assert res[0].raw["frames"][0]["why"] == "illumination_change"
+
+
+def test_pick_leaf_side_keeps_the_half_that_moves(monkeypatch):
+    # handle at x~0.5; the leaf (dark band when open, t >= 5) is on the LEFT of it; the right half
+    # (wall / desk) is static -> keep the left half. Static door -> keep both.
+    def read_left(t):
+        img = _scene(7)
+        if t >= 5:
+            img[30:110, 20:70] = 10  # x 0.125-0.44 of 160 px
+        return img
+
+    tl = _door_tl(10)
+    roi, handle = [0.0, 0.0, 1.0, 0.6], [0.48, 0.3, 0.52, 0.32]
+    new, side = runner.pick_leaf_side(read_left, tl, roi, handle)
+    assert side == "left" and new[2] == pytest.approx(0.5)
+    new, side = runner.pick_leaf_side(lambda t: _scene(7), tl, roi, handle)
+    assert side == "both" and new == roi
+
+
+def test_door_use_height_is_relative_to_the_cashier_not_the_roi(monkeypatch):
+    # big leaf ROI (0.6 high); the cashier stands ~0.3 tall; a 0.13-tall figure over the leaf
+    # (someone behind the glass) would pass a 0.25 x ROI test but is < 0.6 x cashier -> no door use
+    monkeypatch.setattr(runner, "read_frame_at", _door_reader({float(i) for i in range(4, 20)}))
+    tl = _x32_like([0.15, 0.2, 0.22, 0.33])
+    for t in range(10, 18):  # cashier seen standing elsewhere
+        tl["series"]["persons"][t] = [[1, "cashier", [0.6, 0.5, 0.75, 0.8]]]
+    assert runner.cashier_height(tl) == pytest.approx(0.3)
+    res = runner.run_probes("v.mov", [ProbeRequest("door_open", 15.0)], timeline=tl,
+                            calibration={"door": [0.0, 0.0, 0.45, 0.6]})
+    assert res[0].value is None
+
+
+def test_leaf_side_activity_ignores_a_lights_change():
+    # no door movement, but the whole frame darkens from t=5 (lights off) -> neither half "moves"
+    def read(t):
+        img = _scene(7)
+        return (img.astype(np.float32) * (0.3 if t >= 5 else 1.0)).astype(np.uint8)
+
+    roi, handle = [0.0, 0.0, 1.0, 0.6], [0.48, 0.3, 0.52, 0.32]
+    assert runner.pick_leaf_side(read, _door_tl(10), roi, handle) == (roi, "both")
+
+
+def test_current_calibration_door_is_used_older_one_recomputed(frames, monkeypatch):
+    cur = {"door": [0.0, 0.0, 0.3, 0.4], "meta": {"door_roi_version": runner.DOOR_ROI_VERSION}}
+    ctx = runner._Ctx("v.mov", TL, None, cur)
+    assert ctx.roi("door", 1.0) == cur["door"]
+    old = {"door": [0.5, 0.5, 0.52, 0.51], "door_openvocab": None, "meta": {}}  # thin strip from older code
+    ctx = runner._Ctx("v.mov", TL, None, old)
+    roi = ctx.roi("door", 1.0)
+    assert roi != old["door"] and roi[3] - roi[1] >= runner.DOOR_ROI_MIN_H
+    assert ctx.roi("door", 2.0) is roi  # computed once per call
+
+
+def test_door_roi_from_thin_handle_box_covers_the_leaf():
+    # X-32 regression: no doorway zone, open-vocab returned the handle (0.065 x 0.012); padding that
+    # box gave a 0.03-high strip. Now: person-sized pseudo zone at the handle.
+    handle = [0.1381, 0.3143, 0.2031, 0.326]
+    seat = [0.3437, 0.253, 0.5129, 0.4441]
+    roi, src = runner.door_roi(None, 0, handle, seat)
+    assert src == "openvocab_handle"
+    assert roi[3] - roi[1] >= runner.DOOR_ROI_MIN_H
+    assert roi[1] <= 0.12 and roi[3] >= 0.45  # spans the glass leaf vertically (X-32 leaf ~0.03-0.5)
+    assert roi[0] <= 0.05 and roi[2] >= 0.3
+    roi, _ = runner.door_roi(None, 0, handle, None)  # no seat: default person size
+    assert roi[3] - roi[1] >= runner.DOOR_ROI_MIN_H
+
+
+def test_door_roi_source_priority():
+    zone = [0.27, 0.19, 0.32, 0.30]
+    big_ov = [0.004, 0.018, 0.307, 0.51]  # "glass door" box = the leaf
+    assert runner.door_roi(zone, 5, big_ov, None)[1] == "timeline"  # well-supported doorway zone wins
+    roi, src = runner.door_roi(zone, 1, big_ov, None)  # 1-point zone: open-vocab door box instead
+    assert src == "openvocab" and roi[1] == pytest.approx(0.018) and roi[3] == pytest.approx(0.51)
+    assert runner.door_roi(zone, 1, None, None)[1] == "timeline_weak"
+    assert runner.door_roi(None, 0, None, None) == (None, None)
+
+
+def test_thin_door_roi_is_rebuilt():
+    thin_zone = [0.2, 0.30, 0.3, 0.31]
+    roi, src = runner.door_roi(thin_zone, 5, None, None)
+    assert src.endswith("min_height") or roi[3] - roi[1] >= runner.DOOR_ROI_MIN_H
+    assert roi[3] - roi[1] >= runner.DOOR_ROI_MIN_H
+
+
+def test_autocontrast_stretches_dark_crops_and_keeps_full_range():
+    dark = np.full((40, 40, 3), 30, np.uint8)
+    dark[10:30, 10:30] = 90  # dim "screen" in a dark warped/low-brightness view
+    out = runner.autocontrast(dark)
+    assert out.max() >= 250 and out.min() <= 5
+    flat = np.full((10, 10, 3), 77, np.uint8)
+    assert (runner.autocontrast(flat) == flat).all()  # no range -> unchanged
+    full = np.zeros((10, 10, 3), np.uint8)
+    full[5:] = 255
+    assert (runner.autocontrast(full) == full).all()  # already full range -> unchanged
+
+
+def test_screen_crop_is_autocontrasted_other_cues_not(frames, monkeypatch):
+    fake = FakeVLM()
+    monkeypatch.setattr(runner, "get_client", lambda: fake)
+    called = []
+    orig = runner.autocontrast
+    monkeypatch.setattr(runner, "autocontrast", lambda im: called.append(1) or orig(im))
+    runner.run_probes("v.mov", [ProbeRequest("screen_on_unlocked", 1.0), ProbeRequest("cash_on_desk", 1.0)],
+                      timeline=TL, calibration={"laptop": [0.5, 0.5, 0.75, 0.75], "desk": [0.1, 0.4, 0.7, 0.65]})
+    assert called == [1]  # only the screen cue

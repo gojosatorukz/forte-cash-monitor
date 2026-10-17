@@ -109,6 +109,20 @@ def test_empty_denominators_are_none():
     assert m["fp_rate"] == 0.0 and m["accuracy"] == 1.0
 
 
+def test_team_t15_line():
+    from forte_detector.labels import load_labels
+
+    lab = load_labels()
+    res = {v: {"video": v, "verdict": "no_violation", "events": [], "runtime_sec": 1.0} for v in lab}
+    res["X-19"] = {"video": "X-19", "verdict": "violation", "runtime_sec": 1.0,
+                   "events": [{"type": "T15", "timecode_sec": 5.0, "confidence": 0.5}]}
+    res["X-3"] = {"video": "X-3", "verdict": "violation", "runtime_sec": 1.0,
+                  "events": [{"type": "T13", "timecode_sec": 5.0, "confidence": 0.5}]}
+    m = compute_metrics(lab, res)
+    assert m["team"]["t15_hits"] == "1/4" and m["headline"]["fp"] == "2/20"
+    assert m["team"]["fp_excl_team"] == "1/16"
+
+
 def test_degraded_counts_as_error():
     results = {"A": res("A", "violation", [ev(10.0, "T1")]), "D": res("D", "no_violation")}
     results["A"]["degraded"] = results["D"]["degraded"] = True
@@ -146,6 +160,7 @@ def test_select_videos_normalizes_ids():
     assert select_videos(labels, "Х-4, x-47", dedupe=False) == ["X-4", "X-47"]
     assert select_videos(labels, "X-4,X-47", dedupe=True) == ["X-4"]
     assert set(select_videos(labels, "hard", dedupe=False)) == {"X-23", "X-29"}
+    assert select_videos({"X-26": {}, "X-2": {}, "X-99": {}}, "regress", dedupe=False) == ["X-26", "X-2"]
     with pytest.raises(SystemExit):
         select_videos(labels, "X-999", dedupe=False)
 

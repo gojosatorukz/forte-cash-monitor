@@ -209,6 +209,8 @@ class JobRecord(BaseModel):
     partial: bool = False
     meta: dict[str, Any] = Field(default_factory=dict)  # service notes, e.g. budget exhausted
     warnings: list[str] = Field(default_factory=list)  # RU notes shown to the operator (any status)
+    # Human review (extra field, see app/review.py): reviewer, per-violation status, job decision.
+    review: dict[str, Any] | None = None
     upload_path: str | None = None  # internal only, never exposed
 
     def to_public(self) -> dict[str, Any]:

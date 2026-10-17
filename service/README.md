@@ -28,12 +28,24 @@ PORT=9000 STUB_DEBUG=1 ./run.sh        # демо-режим: заглушка �
 
 Веб-интерфейс открывается на `/`. В нём можно загрузить видео, следить за прогрессом и смотреть вердикт и нарушения. Клик по нарушению перематывает плеер на нужный момент. Интерфейс ходит во внутренние маршруты `/ui-api/*`, которым ключ не нужен.
 
+**Доступ к веб-интерфейсу — по паролю.** Страницы, статика и все `/ui-api/*` (включая видео, фрагменты, проверку и `feedback.jsonl`) требуют входа на `/login` с паролем `UI_PASSWORD`; без входа страницы перенаправляют на `/login` (`303`), а `/ui-api/*` и статика отвечают `401 {"detail": "Требуется вход"}`. Сессия — подписанная HMAC-SHA256 cookie `forte_ui` (`HttpOnly; SameSite=Strict; Path=/`, `Secure` по HTTPS), живёт `UI_SESSION_HOURS` часов; смена `UI_PASSWORD` или `UI_SECRET` завершает все сессии. Выход — «Выйти» в шапке (`/logout`). После 20 неверных паролей за 5 минут с одного адреса — `429` «попробуйте через N мин» до конца окна (даже с верным паролем). Без `UI_PASSWORD` интерфейс отключён (`503`), API `/api/v1` при этом работает. **`/api/v1/*` (ключ `X-API-Key`) и `/healthz` паролем не закрыты, cookie на `/api/v1` ничего не даёт.**
+
+```bash
+UI_PASSWORD='длинный-пароль-12+' API_KEY=my-secret ./run.sh   # вход: http://localhost:8000/login
+UI_OPEN=1 ./run.sh                                         # только локальная разработка: без пароля
+```
+
 ## Переменные окружения
 
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
 | `API_KEY` | `forte-datathon-2026` (с предупреждением в лог) | Ключ для заголовка `X-API-Key` на `/api/v1/*` |
-| `HOST` | `0.0.0.0` | Адрес прослушивания (только `run.sh`) |
+| `UI_PASSWORD` | — | Пароль веб-интерфейса (`/login`), **не короче 12 символов**. Обязателен в продакшене. Пустой, короче 12 символов или `change-me` (заглушка из `.env.example`) считается незаданным: страницы и `/ui-api/*` отвечают `503` «Веб-интерфейс отключён: UI_PASSWORD не задан или слишком простой (минимум 12 символов)», в логе ошибка; `/api/v1` работает |
+| `UI_OPEN` | `0` | `1`: интерфейс без пароля (только локальная разработка/тесты, громкое предупреждение в логе). Никогда на публичном адресе. Если задан и годный `UI_PASSWORD`, побеждает пароль (с предупреждением) |
+| `UI_SECRET` | — | Ключ подписи cookie сессии (желательно ≥ 32 случайных байт; короче — работает через SHA-256, с предупреждением). Если не задан, генерируется один раз и хранится в `$DATA_DIR/ui_secret` (права `0600`) |
+| `UI_SESSION_HOURS` | `12` | Время жизни сессии веб-интерфейса, часов |
+| `TRUSTED_PROXIES` | `127.0.0.1/32,::1/128` (в `docker-compose.yml`: плюс шлюз сети `172.30.57.1/32` и `caddy` `172.30.57.10/32`) | Адреса прокси (CIDR через запятую), от которых принимаются `X-Forwarded-For` (берётся **крайний правый** адрес — его добавил наш Caddy) и `X-Forwarded-Proto`. Нужны для лимита попыток входа по IP клиента, флага `Secure` и HSTS. От остальных адресов эти заголовки игнорируются. **Вариант NetBird:** Caddy сервера команды подключается напрямую, поэтому добавьте его NetBird-IP: `TRUSTED_PROXIES=127.0.0.1/32,::1/128,172.30.57.1/32,100.x.y.z/32` |
+| `HOST` | `127.0.0.1` | Адрес прослушивания (только `run.sh`). Релей, Funnel и локальный браузер ходят на localhost. Для демо по LAN или NetBird — `HOST=0.0.0.0` (или NetBird-IP); тогда порт доступен всем в этой сети, `run.sh` предупреждает |
 | `PORT` | `8000` | Порт (`run.sh` и `scripts/tunnel.sh`; в Docker — порт на хосте) |
 | `BIND_ADDR` | `127.0.0.1` | Только Docker: на каком адресе хоста публикуется порт. По умолчанию только loopback — Docker обходит `ufw`, и `0.0.0.0` открыл бы сервис всей локальной сети. Для демо по LAN: `BIND_ADDR=0.0.0.0` и `docker compose up -d` |
 | `DATA_DIR` | `./data` | Хранилище: `uploads/<job_id>/<файл>` и `jobs/<job_id>.json` |
@@ -135,9 +147,34 @@ curl -s -H "X-API-Key: $KEY" http://localhost:8000/api/v1/jobs/<job_id>
 - `meta` — служебные заметки: `meta.analyzer` (то, что анализатор вернул в `AnalysisResult.meta`, если это сериализуется в JSON и занимает не больше ~8 КБ), `meta.analyzer_error` (анализатор упал, но успел что-то найти), `meta.note` (бюджет исчерпан ожиданием в очереди). Без заметок — `{}`.
 - Прочие маршруты:
   - `GET /healthz` → `{"ok": true, "analyzer_ready": true, "analyzer_error": null, "public_url": null, "public_url_source": null, "rules_path": "/…/app/rules.json", "rules_count": 17, "vlm_ok": true, "vlm_url": "http://127.0.0.1:8090/health"}`. `rules_path` / `rules_count` — какой справочник правил загружен и сколько в нём записей. `analyzer_ready` становится `true`, когда анализатор загружен; `analyzer_error` — текст ошибки загрузки; `public_url` / `public_url_source` (`"env"` | `"quick-tunnel"` | `null`) — текущий публичный адрес, см. «Публичный адрес»; `vlm_ok` — ответил ли VLM-сервер на `vlm_url` (HTTP 200 и `ok` в теле; `null`, если проверка отключена). `ok` от VLM не зависит.
+  - `GET /login`, `POST /login` (форма: `password`, `next`), `GET|POST /logout` — вход и выход веб-интерфейса.
   - `HEAD` поддерживается на `/healthz`, `/api/v1/jobs/{id}` (с ключом) и GET-маршрутах `/ui-api/*`.
   - `GET|HEAD /api/v1/jobs/{id}/clips/{n}.mp4` (с ключом, Range) — видеофрагмент нарушения `n` (нумерация с 1; `/clips/0.mp4` → 404 — так и задумано). Клиентам следует брать ссылку из поля `clip_url` нарушения как есть, а не собирать её самим.
-  - `/ui-api/analyze`, `/ui-api/jobs`, `/ui-api/jobs/{id}`, `/ui-api/jobs/{id}/video` и `/ui-api/jobs/{id}/clips/{n}.mp4` (с поддержкой Range), `/ui-api/rules` — для веб-интерфейса, без ключа. В ответах `/ui-api` ссылка `clip_url` указывает на `/ui-api/...`.
+  - `/ui-api/analyze`, `/ui-api/jobs`, `/ui-api/jobs/{id}`, `/ui-api/jobs/{id}/video` и `/ui-api/jobs/{id}/clips/{n}.mp4` (с поддержкой Range), `/ui-api/rules`, `/ui-api/jobs/{id}/review`, `/ui-api/feedback.jsonl` — для веб-интерфейса, без ключа, но только после входа по паролю (cookie сессии, см. «Доступ к веб-интерфейсу»). В ответах `/ui-api` ссылка `clip_url` указывает на `/ui-api/...`.
+
+## Проверка специалистом и акт
+
+Автоматический результат — подсказка для человека, а не окончательный вывод. Поэтому у завершённой задачи есть дополнительное поле `review` (в контракт жюри оно не входит, это лишнее поле; до первой проверки — `null`):
+
+```json
+{"reviewer_name": "Ахметова А. Н.", "reviewer_position": "специалист СВК",
+ "decision": "confirmed",            // "confirmed" | "rejected" | "needs_followup" | null — итог по задаче
+ "decision_comment": "…",
+ "violations": {"1": {"status": "confirmed", "comment": "", "updated_at": "…"},
+                "3": {"status": "rejected", "comment": "это пропуск, а не предмет", "updated_at": "…"}},
+ "created_at": "…", "updated_at": "…", "decided_at": "…"}
+```
+
+- `POST /api/v1/jobs/{id}/review` (с ключом) и `POST /ui-api/jobs/{id}/review` (без ключа) принимают частичное обновление: любое подмножество `reviewer_name`, `reviewer_position`, `decision`, `decision_comment`, `violations: {n: {status?, comment?}}`. Переданное сливается с сохранённым, остальное не меняется. Ответ — полный публичный JSON задачи.
+- Номера `n` — с 1, как в `clip_url`; статус нарушения: `confirmed` | `rejected` | `pending`. Строки обрезаются по краям и ограничиваются (ФИО и должность — 200 символов, комментарии — 2000), тело — не больше 64 КБ. Время ставит сервер; `decided_at` выставляется вместе с `decision` и сбрасывается при `decision: null`.
+- Ошибки: неизвестная задача — `404`, задача не в статусе `done` — `409`, неверный номер, значение, поле или JSON — `422` (тогда ничего не записывается), тело больше 64 КБ — `413`, не JSON по `Content-Type` — `415`. Слияние и запись идут под блокировкой хранилища задач, файл пишется атомарно, параллельные запросы не теряют изменений.
+- Тело запроса — только `Content-Type: application/json` (иначе `415`): так браузер не отправит его с чужого сайта без CORS-предзапроса, на который сервис не отвечает. `/ui-api/feedback.jsonl` и `/ui-api/jobs/{id}/review` без ключа намеренно — это те же данные, что видит веб-интерфейс, и они закрыты паролем интерфейса (cookie `SameSite=Strict`); отдельного входа по сотрудникам нет, ФИО и должность — свободный текст.
+- Веб-интерфейс: блок «Проверка специалистом» над списком нарушений (ФИО и должность запоминаются в браузере, итоговое решение, «Проверено N из M»), в карточке нарушения — «Подтвердить» / «Отклонить» и комментарий. Всё сохраняется автоматически, комментарии — через ~0,6 с после ввода. Кнопка «Сформировать акт» (нужно ФИО) открывает `/act.html#job=<id>`: акт проверки соблюдения кассовой дисциплины на A4 (подтверждённые нарушения с кадром и нормой, отклонённые, нерассмотренные, заключение, подписи). Пока есть нерассмотренные срабатывания или нет итогового решения, на акте стоит «ЧЕРНОВИК». PDF — через «Печать» → «Сохранить как PDF».
+
+**Данные для дообучения.** `GET /api/v1/feedback.jsonl` (с ключом; без ключа — `/ui-api/feedback.jsonl`, на неё ссылается интерфейс) отдаёт размеченную обратную связь в формате NDJSON (`application/x-ndjson`), задачи — от старых к новым, без изображений. Это материал для дообучения модели и настройки порогов:
+
+- по строке на каждое рассмотренное нарушение (`status` ≠ `pending`): `{"kind": "violation", job_id, filename, video_meta, n, type_id, type, timecode_sec, start_sec, end_sec, fact_conf, legal_conf, legal_strength?, analyzer_description?, description, status, comment, reviewer_name, reviewer_position, updated_at}`;
+- по строке на каждую задачу с итоговым решением: `{"kind": "job", job_id, filename, verdict, decision, decision_comment, reviewer_name, reviewer_position, decided_at, n_violations, n_confirmed, n_rejected}`.
 
 ## Доказательства: разметка и видеофрагменты
 
@@ -413,6 +450,8 @@ sudo systemctl enable --now forte-relay
 journalctl -u forte-relay -f                           # без ошибок = туннель поднят
 ```
 
+На боевом ПК релей сейчас работает без autossh: обычный `ssh -N -R ...` с `ServerAliveInterval`/`ServerAliveCountMax` под systemd `Restart=always` (перезапуск после обрыва делает systemd). Юнит с autossh из `deploy/systemd` — равноценная альтернатива.
+
 Юнит не зависит ни от Docker, ни от `forte-service`: перезапуск сервиса туннель не рвёт. `Restart=always`, `StartLimitIntervalSec=0`, `AUTOSSH_GATETIME=0`, `AUTOSSH_POLL=30` — переподключается бесконечно, в том числе если при загрузке сети ещё нет. Обрыв связи ssh замечает за ~45 с (`ServerAliveInterval=15` × 3). С Docker приложение слушает `127.0.0.1:8000` на хосте — именно туда идёт туннель.
 
 **6. `.env` на ПК:** `PUBLIC_HOSTNAME=forte.incode.kz`, затем `docker compose up -d` (bare-metal: `sudo systemctl restart forte-service`). `/healthz` покажет `"public_url": "https://forte.incode.kz"`, `"public_url_source": "env"`.
@@ -427,7 +466,7 @@ curl -s 127.0.0.1:18000/healthz
 curl -s https://forte.incode.kz/healthz
 ```
 
-**Вариант 2: NetBird вместо SSH-туннеля** (только описание, если SSH-доступа к серверу недостаточно или нужен постоянный mesh). На ПК и на сервере: `curl -fsSL https://pkgs.netbird.io/install.sh | sh`, затем `sudo netbird up --setup-key <ключ из панели NetBird>` (или `sudo netbird up` и вход по ссылке); `netbird status` показывает адрес ПК вида `100.x.y.z`. На сервере прокси смотрит на `<netbird-ip-ПК>:8000`: Caddy — `FORTE_UPSTREAM=<netbird-ip>:8000` в окружении (`sudo systemctl edit caddy`), nginx — строка `server` в блоке `upstream forte_pc`. На ПК приложение должно слушать этот интерфейс: при Docker `BIND_ADDR=<netbird-ip>` (или `0.0.0.0` + разрешить в файрволе только `100.64.0.0/10`), bare-metal `run.sh` и так слушает `0.0.0.0`. `forte-relay.service` в этом варианте не нужен.
+**Вариант 2: NetBird вместо SSH-туннеля** (только описание, если SSH-доступа к серверу недостаточно или нужен постоянный mesh). На ПК и на сервере: `curl -fsSL https://pkgs.netbird.io/install.sh | sh`, затем `sudo netbird up --setup-key <ключ из панели NetBird>` (или `sudo netbird up` и вход по ссылке); `netbird status` показывает адрес ПК вида `100.x.y.z`. На сервере прокси смотрит на `<netbird-ip-ПК>:8000`: Caddy — `FORTE_UPSTREAM=<netbird-ip>:8000` в окружении (`sudo systemctl edit caddy`), nginx — строка `server` в блоке `upstream forte_pc`. На ПК приложение должно слушать этот интерфейс: при Docker `BIND_ADDR=<netbird-ip>` (или `0.0.0.0` + разрешить в файрволе только `100.64.0.0/10`), bare-metal `run.sh` — `HOST=0.0.0.0` (или `HOST=<netbird-ip>`) в `.env`. Добавьте NetBird-IP сервера в `TRUSTED_PROXIES` (см. таблицу переменных), иначе лимит попыток входа будет считать всех клиентов одним адресом, а cookie не получит `Secure`. `forte-relay.service` в этом варианте не нужен.
 
 ### Запасные варианты
 
@@ -526,7 +565,7 @@ sudo systemctl unmask sleep.target suspend.target hibernate.target hybrid-sleep.
 Перед отправкой адреса жюри:
 
 1. `curl -s localhost:8000/healthz` → `"analyzer_ready": true`, `"analyzer_error": null`, `public_url` — тот адрес, который отправляете (`https://forte.incode.kz`).
-2. В `.env` задан свой `API_KEY` (в логе нет предупреждения про ключ по умолчанию).
+2. В `.env` задан свой `API_KEY` (в логе нет предупреждения про ключ по умолчанию) и **свой стойкий `UI_PASSWORD`** (передаётся только внутри команды; в логе нет предупреждений про `UI_PASSWORD` / `UI_OPEN`). Без него интерфейс отвечает `503`; `UI_OPEN=1` на публичном адресе недопустим — видео жюри нельзя публиковать.
 3. GPU виден сервису: `docker compose exec app nvidia-smi`.
 4. Релей: `systemctl is-active forte-relay` → `active`, в `journalctl -u forte-relay -n 20` нет ошибок; на сервере `ss -ltn | grep 18000` показывает `127.0.0.1:18000`.
 5. Проверка через публичный адрес **снаружи локальной сети** (с телефона или ноутбука через мобильный интернет, не через Wi-Fi площадки):
@@ -536,7 +575,11 @@ sudo systemctl unmask sleep.target suspend.target hibernate.target hybrid-sleep.
    curl -s -o /dev/null -w '%{http_code}\n' $URL/api/v1/jobs/x                         # 401 без ключа
    curl -s -H "X-API-Key: $KEY" -F file=@sample.mov $URL/api/v1/analyze                # {"job_id": ...}
    curl -s -H "X-API-Key: $KEY" $URL/api/v1/jobs/<job_id>                               # опрашивать до status=done (< 280 с)
+   curl -sI $URL/ | head -3                                                             # 303, location: /login?next=/
+   curl -s -o /dev/null -w '%{http_code}\n' $URL/ui-api/jobs                            # 401 без входа
+   curl -s -o /dev/null -w '%{http_code}\n' $URL/app.js                                 # 401 без входа
    ```
+   И в браузере: `https://forte.incode.kz/` → страница входа, после пароля — интерфейс; «Выйти» возвращает на вход.
 6. Автозапуск: `systemctl is-enabled docker forte-relay` (или `forte-service forte-relay`) → `enabled`.
 7. После отправки адреса **не перезапускайте** без нужды машину, туннель, Funnel или Caddy. Релей после перезагрузки поднимается сам (адрес тот же), но это минута простоя; с quick tunnel перезапуск = новый адрес.
 
@@ -562,9 +605,10 @@ uv run pytest
 
 ## Лицензии и ограничения
 
-- Все Python-зависимости под пермиссивными лицензиями: FastAPI, Starlette, uvicorn, pydantic, python-multipart, httpx — MIT/BSD; NumPy — BSD; opencv-python-headless — Apache-2.0/MIT; Pillow — MIT-CMU (HPND); pytest — MIT. GPL/AGPL-пакетов нет.
+- Все Python-зависимости под пермиссивными лицензиями: FastAPI, Starlette, uvicorn, pydantic, python-multipart, httpx — MIT/BSD; NumPy — BSD; opencv-python-headless — Apache-2.0/MIT; Pillow — MIT-CMU (HPND); pytest — MIT. Среди Python-зависимостей GPL/AGPL-пакетов нет.
 - Шрифт DejaVu Sans (`app/assets/fonts/DejaVuSans.ttf`) — свободная лицензия Bitstream Vera / DejaVu, текст в `app/assets/fonts/LICENSE-DejaVu.txt`.
-- ffmpeg вызывается как внешняя программа (системный пакет), а не линкуется.
+- ffmpeg/ffprobe — внешние программы. На боевом ПК стоит статическая сборка BtbN (GPLv3, с libx264; ею кодируются фрагменты-доказательства). Сервис запускает её отдельным процессом (subprocess): ffmpeg не линкуется с нашим кодом и не распространяется вместе с ним, поэтому это допустимо. Обязательства GPL возникли бы только при распространении самих бинарников ffmpeg.
+- Фирменный стиль веб-интерфейса (`app/static/assets/`): логотип и значок Forte — официальные SVG со страницы брендбука https://forte.kz/en/logo (прототип для кейса ForteBank), без изменений; шрифт Open Sans — SIL Open Font License 1.1 (из архива https://forte.kz/docs/open-sans.zip, переведён в WOFF2), текст лицензии — `app/static/assets/fonts/OFL.txt`. Всё отдаётся локально, без CDN.
 - cloudflared — Apache-2.0, опционален и не входит в зависимости проекта.
 - Никаких облачных AI API. Распознавания и идентификации лиц нет.
 
@@ -574,12 +618,14 @@ uv run pytest
 
 This is a local service for the ForteBank Datathon 2026. It analyses cash-room videos for procedure violations and returns a verdict, timecoded violations, JPEG evidence frames and a citation of the regulation. It runs fully offline: no cloud or AI APIs and no face recognition. The analyzer is a plug-in; the default `StubAnalyzer` decodes the video and returns `no_violation`, or one labelled demo violation with `STUB_DEBUG=1`.
 
-- **Run:** `API_KEY=secret ./run.sh` starts a single uvicorn process on `0.0.0.0:${PORT:-8000}`. It must stay a single process because the job queue and worker are in-process. The web UI (Russian) is served at `/`. It needs `uv` and `ffmpeg`/`ffprobe`.
+- **Run:** `API_KEY=secret ./run.sh` starts a single uvicorn process on `${HOST:-127.0.0.1}:${PORT:-8000}` (loopback by default; `HOST=0.0.0.0` for a LAN demo or NetBird). It must stay a single process because the job queue and worker are in-process. The web UI (Russian) is served at `/`. It needs `uv` and `ffmpeg`/`ffprobe`.
+- **UI access:** pages, static assets and all `/ui-api/*` require a login at `/login` with `UI_PASSWORD` (HMAC-signed `forte_ui` cookie, `HttpOnly; SameSite=Strict`, `Secure` over HTTPS, `UI_SESSION_HOURS`=12; signing key `UI_SECRET` or a generated `$DATA_DIR/ui_secret`, mode 0600). Without a session: pages → 303 `/login`, `/ui-api` and static → 401. No `UI_PASSWORD` (or the `change-me` placeholder, or < 12 chars) → UI answers 503; `UI_OPEN=1` disables the gate (dev only). 20 failed logins per client IP in 5 min → 429 (also blocks the right password while locked); the client IP is the rightmost `X-Forwarded-For` entry only when the socket peer is in `TRUSTED_PROXIES` (default loopback; docker-compose adds its gateway `172.30.57.1` and caddy `172.30.57.10`; NetBird: add the team server's NetBird IP). `/api/v1/*` (API key only; a cookie grants nothing) and `/healthz` are not gated.
 - **API:**
   - `POST /api/v1/analyze` with multipart field `file` → `{"job_id"}`.
   - `GET /api/v1/jobs/{id}` → `{job_id, status, verdict, violations[...]}`.
   - `GET|HEAD /api/v1/jobs/{id}/clips/{n}.mp4` → evidence clip of violation `n` (Range supported). `n` is 1-based; `/clips/0.mp4` → 404 by design. Clients should use each violation's `clip_url` as given rather than building URLs.
   - All need `X-API-Key`.
+  - Human review (extra field `review`, never part of the jury contract): `POST /api/v1/jobs/{id}/review` (key) / `POST /ui-api/jobs/{id}/review` (no key) merges a partial update of `reviewer_name`, `reviewer_position`, `decision` (`confirmed`/`rejected`/`needs_followup`/null), `decision_comment`, `violations: {n: {status: confirmed|rejected|pending, comment}}` (n 1-based); 404 unknown job, 409 not done, 422 invalid, 413 body > 64 KB, 415 unless `Content-Type: application/json` (forces a CORS preflight). The `/ui-api` review and feedback routes are keyless by design (same data as the UI) but sit behind the UI password; reviewer name/position are free text. The UI review panel autosaves and opens a printable A4 act at `/act.html#job=<id>` («ЧЕРНОВИК» watermark until everything is reviewed and decided). `GET /api/v1/feedback.jsonl` (key; `/ui-api/feedback.jsonl` without) exports labelled feedback as NDJSON for retraining / threshold tuning: one `kind: "violation"` line per reviewed violation and one `kind: "job"` line per decided job, oldest job first, no images.
   - Evidence: analyzer frames may carry `boxes: [{x, y, w, h, label?, kind?}]` (normalized to the JPEG; `kind` person/object/region). The first boxed frame is drawn (Pillow, DejaVu Sans) and returned as `evidence_frames[0]` (`annotated: true`), its raw copy as `[1]`, then the rest (each boxed one drawn too, unboxed ones as is), max 3; a drawing failure leaves only that frame raw. Each violation gets a 3–8 s H.264 480p MP4 (`clip_url`) cut most-important-first (fact_conf/confidence, then timecode) before its own deadline `submit + JOB_HARD_CAP_SEC − 2 s` (never taking time from the analyzer, never past the cap); extra clockwise rotation comes from `AnalysisResult.meta["applied_rotation_deg"]` (0 when there is no meta, e.g. after a timeout). Clips skipped/killed for time add «не хватило времени на нарезку клипов № …», real failures «не удалось создать клипы № …»; neither fails the job.
   - See the curl examples and the sample response above.
 - **Env vars:** `API_KEY`, `HOST`, `PORT`, `DATA_DIR`, `JOB_TIMEOUT_SEC` (default 270, target budget from submit), `JOB_HARD_CAP_SEC` (default 280, absolute ceiling from submit), `MAX_UPLOAD_MB` (default 200), `ANALYZER` (`module:Class`), `STUB_DEBUG`, `RULES_PATH`. The real per-job deadline is `min(max(submit + JOB_TIMEOUT_SEC, start + 20 s), submit + JOB_HARD_CAP_SEC)`; the partial result is returned at that deadline. Upload time and queue wait count towards it.
@@ -598,10 +644,10 @@ This is a local service for the ForteBank Datathon 2026. It analyses cash-room v
   - Docker (primary): install Docker Engine + NVIDIA Container Toolkit (`nvidia-ctk runtime configure --runtime=docker`, restart docker), verify with `docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi`, `sudo systemctl enable docker`, then `cp .env.example .env` (set `API_KEY`), `mkdir -p data models`, `docker compose up -d --build`. Image: `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04`, uv-managed Python 3.12, non-root uid 1000, healthcheck on `/healthz`; volumes `./data` and `./models` (`MODELS_DIR`/`HF_HOME`/`TORCH_HOME`). In Docker the default rules lookup finds only the bundled `app/rules.json`: mount the detector file and set `RULES_PATH` (override example in the RU section); the analyzer code must be baked into the image or mounted (`PYTHONPATH`), with `ANALYZER` set.
   - Bare metal (fallback): `scripts/setup.sh [--with-cloudflared]` (no sudo; prints apt hints), then systemd units from `deploy/systemd/` (edit `User`/`WorkingDirectory`/paths, `systemctl daemon-reload && systemctl enable --now forte-service forte-tunnel`).
   - Docker publishes the app on `${BIND_ADDR:-127.0.0.1}:${PORT:-8000}` (loopback only, since Docker bypasses ufw; `BIND_ADDR=0.0.0.0` for a LAN demo). After editing `.env` run `docker compose up -d` (`restart` does not re-read it).
-  - Public URL, primary: **relay** via the team server. `forte.incode.kz` A → 89.126.193.108; the server's Caddy (`deploy/relay/forte.caddy`, imported drop-in) or nginx (`deploy/relay/forte.incode.kz.nginx` + certbot) terminates TLS (250 MB body, 600 s timeouts, streamed uploads) and proxies to its `127.0.0.1:18000`, which `deploy/systemd/forte-relay.service` (autossh `-R 127.0.0.1:18000:127.0.0.1:8000`, dedicated key restricted with `restrict,port-forwarding,permitlisten="127.0.0.1:18000"`) forwards to the PC. **Required** sshd drop-in `deploy/relay/sshd-forte-relay.conf` (`ClientAliveInterval 15`/`CountMax 3` for that user; without it a dead session holds port 18000 for ~2 h and every reconnect fails → 502); verify with `sudo sshd -T -C user=forte-relay,host=x,addr=1.2.3.4 | grep -i clientalive`. Proxies keep idle upstream connections 60 s, uvicorn runs with `--timeout-keep-alive 75`. Alternative private link: NetBird (upstream `<netbird-ip>:8000`). Set `PUBLIC_HOSTNAME=forte.incode.kz`.
+  - Public URL, primary: **relay** via the team server. `forte.incode.kz` A → 89.126.193.108; the server's Caddy (`deploy/relay/forte.caddy`, imported drop-in) or nginx (`deploy/relay/forte.incode.kz.nginx` + certbot) terminates TLS (250 MB body, 600 s timeouts, streamed uploads) and proxies to its `127.0.0.1:18000`, which the PC forwards over a reverse SSH tunnel (`-R 127.0.0.1:18000:127.0.0.1:8000`; in production a plain `ssh` with `ServerAliveInterval`/`ServerAliveCountMax` under systemd `Restart=always`, not autossh; the autossh unit `deploy/systemd/forte-relay.service` is an alternative; dedicated key restricted with `restrict,port-forwarding,permitlisten="127.0.0.1:18000"`). **Required** sshd drop-in `deploy/relay/sshd-forte-relay.conf` (`ClientAliveInterval 15`/`CountMax 3` for that user; without it a dead session holds port 18000 for ~2 h and every reconnect fails → 502); verify with `sudo sshd -T -C user=forte-relay,host=x,addr=1.2.3.4 | grep -i clientalive`. Proxies keep idle upstream connections 60 s, uvicorn runs with `--timeout-keep-alive 75`. Alternative private link: NetBird (upstream `<netbird-ip>:8000`). Set `PUBLIC_HOSTNAME=forte.incode.kz`.
   - Public URL fallbacks (DNS at hoster.kz): **A)** public IP → A record + forward 80/443 + `PUBLIC_HOSTNAME=...` + `docker compose --profile caddy up -d caddy` (`deploy/Caddyfile`, automatic HTTPS, 250 MB body, 10 min timeouts); **B)** CGNAT (`curl -4 ifconfig.me` ≠ router WAN IP, or WAN in 100.64.0.0/10) → Tailscale Funnel (`sudo tailscale funnel --bg 8000`, `PUBLIC_HOSTNAME=<pc>.<tailnet>.ts.net`); **C)** last resort: Cloudflare quick tunnel (`docker compose --profile tunnel up -d` or `forte-tunnel.service`, independent of the app). **A quick tunnel gets a new random URL on every tunnel restart/reboot**; `scripts/public_url.sh` reads it from cloudflared's metrics (`/quicktunnel`, fallback: logs of the current unit invocation / container start only) into `data/public_url.txt`; `forte-tunnel.service` deletes the file on stop. cloudflared image pinned to `2026.10.1`. **D)** named Cloudflare tunnel: dormant. `/healthz` reports `public_url` + `public_url_source` (`PUBLIC_HOSTNAME` → `"env"`, else `PUBLIC_URL_FILE` → `"quick-tunnel"`).
   - torch: `pyproject.toml` maps `torch`/`torchvision` to the explicit `pytorch-cu128` index; `uv add "torch>=2.7" torchvision` gets CUDA 12.8 wheels (required for Blackwell sm_120).
   - Jury day: mask sleep targets; stop automatic upgrades (`systemctl disable --now apt-daily.timer apt-daily-upgrade.timer`, `APT::Periodic::* "0"` in `20auto-upgrades`, `apt-mark hold` the NVIDIA driver, docker-ce, containerd.io, nvidia-container-toolkit; undo steps in the RU section); `forte-relay` active and `curl https://forte.incode.kz/healthz` from mobile data; check `analyzer_ready` + `public_url` in `/healthz`, own `API_KEY`; test analyze + poll with curl through the public URL from outside the LAN (mobile data); do not restart the tunnel after sending the URL.
   - WSL2: Windows NVIDIA driver only; Docker Desktop (WSL2 backend) or docker-ce + toolkit inside WSL.
 - **Tests:** `uv run pytest`.
-- **Licenses:** all dependencies are permissive (MIT/BSD/Apache-2.0); there is no GPL/AGPL code. cloudflared (Apache-2.0) is optional.
+- **Licenses:** all Python dependencies are permissive (MIT/BSD/Apache-2.0). ffmpeg/ffprobe are external programs: the production PC uses the BtbN static build (GPLv3, includes libx264, used to encode the evidence clips). The service runs it as a separate process (subprocess); it is not linked with or distributed alongside our code, which is acceptable. GPL obligations would apply only if we redistributed the ffmpeg binaries. cloudflared (Apache-2.0) is optional. UI brand assets in `app/static/assets/`: the official Forte logo/favicon SVGs (unchanged, from forte.kz/en/logo) and Open Sans (SIL OFL 1.1, license in `assets/fonts/OFL.txt`), all served locally.

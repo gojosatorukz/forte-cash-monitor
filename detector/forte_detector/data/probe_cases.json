@@ -50,6 +50,20 @@
 },
 {
 "cue": "cash_on_desk",
+"vid": "X-44",
+"t": 5.0,
+"expected": false,
+"note": "mid-count: notes inside the counting machine, desk empty (D)"
+},
+{
+"cue": "cash_on_desk",
+"vid": "X-45",
+"t": 6.0,
+"expected": false,
+"note": "mid-count: machine counting, hands folded (D)"
+},
+{
+"cue": "cash_on_desk",
 "vid": "X-5",
 "t": 62.0,
 "expected": false,
@@ -264,6 +278,27 @@
 "t": 16.0,
 "expected": false,
 "note": "Windows lock screen (B)"
+},
+{
+"cue": "screen_on_unlocked",
+"vid": "X-22",
+"t": 18.0,
+"expected": false,
+"note": "PC locked before leaving (B)"
+},
+{
+"cue": "screen_on_unlocked",
+"vid": "X-12",
+"t": 38.0,
+"expected": false,
+"note": "lid closed, lights off (A)"
+},
+{
+"cue": "screen_on_unlocked",
+"vid": "X-11",
+"t": 21.0,
+"expected": true,
+"note": "laptop left on and lit after exit, dark room (A)"
 },
 {
 "cue": "safe_open",
@@ -676,6 +711,105 @@
 "extra_ts": [
 6.5,
 8.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-1",
+"t": 6.0,
+"expected": true,
+"note": "client hands ID, cashier looks it over (A)",
+"extra_ts": [
+5.5,
+6.5
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-4",
+"t": 12.0,
+"expected": true,
+"note": "client 1 hands over the ID (A)",
+"extra_ts": [
+11.5,
+13.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-4",
+"t": 61.0,
+"expected": true,
+"note": "client 2 hands over the ID (A)",
+"extra_ts": [
+60.0,
+62.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-5",
+"t": 10.0,
+"expected": true,
+"note": "ID handed over and checked (A)",
+"extra_ts": [
+9.0,
+11.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-19",
+"t": 7.0,
+"expected": false,
+"note": "banknotes handed over, no ID (B)",
+"extra_ts": [
+6.5,
+8.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-35",
+"t": 6.5,
+"expected": false,
+"note": "banknotes put on desk, no ID (D)",
+"extra_ts": [
+6.0,
+7.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-37",
+"t": 7.5,
+"expected": false,
+"note": "cash put on desk, no ID (D)",
+"extra_ts": [
+7.0,
+8.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-39",
+"t": 6.5,
+"expected": false,
+"note": "cash handed over, no ID (D)",
+"extra_ts": [
+6.0,
+7.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-38",
+"t": 6.5,
+"expected": false,
+"note": "cash handed over, no ID (D)",
+"extra_ts": [
+6.0,
+7.0
 ]
 },
 {

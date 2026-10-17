@@ -19,6 +19,11 @@ services:
         required: false
     environment:
       DATA_DIR: /app/data   # fixed inside the container; overrides any DATA_DIR from .env
+      # Proxies whose X-Forwarded-For (rightmost entry) / X-Forwarded-Proto the UI login trusts. Traffic to the
+      # published port (relay autossh / Funnel -> 127.0.0.1:8000 -> docker-proxy) reaches the container from the
+      # network gateway 172.30.57.1; the optional caddy service has the fixed address 172.30.57.10.
+      # NetBird variant: put TRUSTED_PROXIES=<team server NetBird IP>/32 (plus these) in .env.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1/32,::1/128,172.30.57.1/32,172.30.57.10/32}
     volumes:
       - ./data:/app/data
       - ./models:/models
@@ -51,6 +56,9 @@ services:
       - >-
         if [ -z "$$PUBLIC_HOSTNAME" ]; then echo "error: set PUBLIC_HOSTNAME in .env, then docker compose --profile caddy up -d caddy" >&2; exit 1; fi;
         exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    networks:
+      default:
+        ipv4_address: 172.30.57.10   # listed in the app's TRUSTED_PROXIES
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data        # certificates: keep this volume, or Let's Encrypt rate limits may bite
@@ -88,6 +96,14 @@ services:
     restart: unless-stopped
 
   # (D) Named Cloudflare tunnel: dormant (needs the domain's DNS on Cloudflare). README has the commands.
+
+# Fixed subnet so the app can trust exactly the gateway (docker-proxy) and caddy, not all of 172.16.0.0/12.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.57.0/24
+          gateway: 172.30.57.1
 
 volumes:
   caddy_data:

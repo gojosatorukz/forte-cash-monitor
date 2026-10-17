@@ -17,14 +17,16 @@ from datetime import datetime
 from pathlib import Path
 
 from forte_detector import config
-from forte_detector.labels import load_labels, normalize_id
+from forte_detector.labels import TEAM_T15_CLEAN, load_labels, normalize_id
 
 from eval.folds import cross_validate
 from eval.hard_negatives import hard_negative_ids, hard_negative_report
 from eval.variants import VARIANTS, resolve_variants
 
 DEFAULT_ANALYZER = "forte_detector.analyzers.stub:analyze"
-DUPLICATE_IDS = ("X-47", "X-48")  # identical to X-4 / X-5
+DUPLICATE_IDS = ("X-47", "X-48")
+# Fast regression set: clips that regressed once (X-26 T1, X-32/X-33 T5, X-2 T15/T10) + passing anchors.
+REGRESS_IDS = ("X-26", "X-32", "X-33", "X-2", "X-15", "X-17", "X-30", "X-40")  # identical to X-4 / X-5
 
 
 # ----------------------------------------------------------------------------- metrics
@@ -100,7 +102,13 @@ def compute_metrics(labels: dict, results: dict) -> dict:
         for t in v["pred_types"]:
             fired.setdefault(t, {"tp_videos": 0, "fp_videos": 0})["tp_videos" if v["gt"] else "fp_videos"] += 1
     n_pos, n_neg = len(pos), n - len(pos)
+    team_ids = [v for v in TEAM_T15_CLEAN if v in per_video]
+    team_hits = sum("T15" in per_video[v]["pred_types"] for v in team_ids)
+    neg_excl = [v for v, x in per_video.items() if not x["gt"] and v not in TEAM_T15_CLEAN]
+    fp_excl = sum(per_video[v]["outcome"] in ("FP", "ERR") for v in neg_excl)
     return {
+        "team": {"t15_hits": f"{team_hits}/{len(team_ids)}", "t15_videos": team_ids,
+                 "fp_excl_team": f"{fp_excl}/{len(neg_excl)}", "fp_excl_team_n": fp_excl},
         "headline": {
             "recall": f"{conf['tp']}/{n_pos}", "fp": f"{conf['fp']}/{n_neg}",
             "n_pos": n_pos, "n_neg": n_neg,
@@ -157,11 +165,13 @@ def run_one(analyze, path: Path, transform) -> dict:
 
 def select_videos(labels: dict, spec: str, dedupe: bool) -> list[str]:
     """`spec` = "all" | comma list of ids (Cyrillic "Х-4" / lowercase "x-4" accepted) | "hard"
-    (the hard-negative clean clips)."""
+    (the hard-negative clean clips) | "regress" (fast regression set, REGRESS_IDS)."""
     if spec == "all":
         ids = list(labels)
     elif spec == "hard":
         ids = [i for i in hard_negative_ids() if i in labels]
+    elif spec == "regress":
+        ids = [i for i in REGRESS_IDS if i in labels]
     else:
         ids = [normalize_id(s) for s in spec.split(",") if s.strip()]
     unknown = [i for i in ids if i not in labels]
@@ -189,6 +199,10 @@ def render_report(summary: dict) -> str:
                    f" type-hit {_f(m['type_hit_rate'], pct=True)} (primary {_f(m.get('primary_hit_rate'), pct=True)}),"
                    f" hit@5s {_f(m['hit5_rate'], pct=True)},"
                    f" mean abs Δt {_f(m['mean_abs_dt'])} s, errors {m['n_errors']}")
+        tm = m.get("team")
+        if tm:
+            out.append(f"  - team labels (human review 2): team-labelled T15 hits on X-19/35/37/39: {tm['t15_hits']};"
+                       f" FP incl. those 4: {h['fp']}, FP excl. those 4: {tm['fp_excl_team']}")
         cv = m.get("cv")
         if cv:
             out.append(f"  - 2-fold CV of the verdict threshold (eval/folds.py): fold A {cv['A']['recall']} recall,"

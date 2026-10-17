@@ -66,6 +66,11 @@ def _gray_small(img: np.ndarray, long_side: int = 192) -> np.ndarray:
 # ----------------------------------------------------------------------------- camera blocked
 
 
+def global_brightness(img: np.ndarray) -> float:
+    """Mean luminance of the whole (downscaled) frame."""
+    return float(_gray_small(img, 96).mean())
+
+
 def frame_stats(img: np.ndarray) -> dict:
     g = _gray_small(img)
     mean, std = float(g.mean()), float(g.std())

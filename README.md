@@ -1,6 +1,17 @@
 # Forte: мониторинг кассовой дисциплины
 
-Снимок монорепозитория (2026-10-17): веб-сервис, детектор нарушений и документация.
+Снимок монорепозитория (2026-10-17, вечер): веб-сервис, детектор нарушений и документация.
+
+Источники: `service` @ `beb6988`, `detector` @ `9f8d3b9`.
+
+## Что нового
+
+- Вход в веб-интерфейс по паролю (`UI_PASSWORD`, `/login`); API `/api/v1/*` по-прежнему по ключу.
+- Ручная проверка нарушений (подтвердить / отклонить) и печатный акт проверки.
+- Визуальный стиль Forte (логотип, шрифт, цвета).
+- Рамки на кадрах-доказательствах и короткие видеофрагменты нарушений.
+- Правило T15 (нарушение процедуры).
+- Детектор: 19 из 22 на оригинальных видео.
 
 ## Структура
 
@@ -28,4 +39,4 @@
 
 ## English
 
-Snapshot of the Forte cash-discipline monitor: `service/` (FastAPI web service + UI, see `service/README.md`), `detector/` (frame probes + local VLM + rules engine), `docs/` (case brief, findings, regulations, decisions; final deliverables in `docs/deliverables/`), and `spike/` (llama-server VLM spike scripts). The service calls the detector, which queries a local VLM served by llama.cpp's `llama-server`. Live instance: https://forte.incode.kz. No API keys, videos, frames or model weights are included.
+Snapshot of the Forte cash-discipline monitor (2026-10-17 evening; service `beb6988`, detector `9f8d3b9`). New: UI password gate, human review + printable act, Forte visual identity, boxes + evidence clips, T15 procedure rule, detector 19/22 on originals. Contents: `service/` (FastAPI web service + UI, see `service/README.md`), `detector/` (frame probes + local VLM + rules engine), `docs/` (case brief, findings, regulations, decisions; final deliverables in `docs/deliverables/`), and `spike/` (llama-server VLM spike scripts). The service calls the detector, which queries a local VLM served by llama.cpp's `llama-server`. Live instance: https://forte.incode.kz. No API keys, videos, frames or model weights are included.

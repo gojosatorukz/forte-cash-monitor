@@ -36,6 +36,12 @@ uv run python -m eval.run_eval --analyzer forte_detector.analyzers.stub:analyze 
     --videos X-15,X-17,X-43 --variant robust --out runs/robust/
 ```
 
+Video sets: `--videos all` (42), `--videos hard` (hard-negative clean clips), `--videos regress`
+(fast regression set: X-26, X-32, X-33, X-2 + anchors X-15, X-17, X-30, X-40), or a comma list.
+Gate for every ff (orchestrator): the 42-orig eval of a clean `git archive` export of the candidate
+with the prod VLM must reach recall >= best-so-far (15/22) with FP <= 6/20; report hard-negative FP,
+2-fold CV and the reencode flips too.
+
 Options: `--variant orig|hflip|rot90cw|rot+12|rot-12|crop80|crop_tl|dark|all|robust` (or a comma list;
 robust = orig,hflip,rot+12,crop80,rot90cw), `--dedupe` skips X-47/X-48. Outputs
 `runs/<ts>/<variant>/<id>/result.json`, `summary.json`, `report.md`.

@@ -3,207 +3,311 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Контроль кассовой дисциплины</title>
-  <meta name="description" content="Анализ видеозаписей кассового помещения">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237B1E3A'/%3E%3Cpath d='M9 22V10h14' stroke='white' stroke-width='3' fill='none' stroke-linecap='round'/%3E%3Ccircle cx='20' cy='19' r='3.2' fill='white'/%3E%3C/svg%3E">
+  <title>Forte Cash Monitor · Контроль кассовой дисциплины</title>
+  <meta name="description" content="Локальный анализ видеозаписей кассового помещения: нарушения регламента, кадры-доказательства, таймкоды и нормы НБРК">
+  <meta name="theme-color" content="#4A0221">
+  <link rel="icon" href="assets/brand/favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="assets/fonts/OpenSans.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="app.css">
 </head>
-<body>
+<body data-view="upload">
   <a class="skip-link" href="#main">Перейти к содержимому</a>
 
-  <header class="topbar">
-    <div class="topbar__inner">
-      <a class="brand" href="#" id="brand-link" aria-label="На главную">
-        <svg class="brand__mark" viewBox="0 0 40 40" aria-hidden="true">
-          <rect width="40" height="40" rx="9" fill="currentColor"/>
-          <path d="M11 28V12h18" stroke="#fff" stroke-width="3.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M17 18h8" stroke="#fff" stroke-width="3.4" stroke-linecap="round" opacity=".55"/>
-          <circle cx="25.5" cy="25" r="4" fill="#fff"/>
-        </svg>
-        <span class="brand__text">
-          <span class="brand__title">Контроль кассовой дисциплины</span>
-          <span class="brand__subtitle">Анализ видеозаписей кассового помещения</span>
-        </span>
+  <!-- Sidebar (desktop) -->
+  <aside class="sidebar" aria-label="Навигация">
+    <a class="brand js-home" href="./" id="brand-link" aria-label="Forte Cash Monitor — новая проверка">
+      <img class="brand__logo" src="assets/brand/forte-magenta.svg" width="142" height="42" alt="Forte">
+    </a>
+    <div class="product-name">Cash Monitor<span>Контроль кассовой дисциплины</span></div>
+
+    <div class="sidebar-label">Рабочее пространство</div>
+    <nav class="sidenav" aria-label="Разделы">
+      <a class="nav-item is-active js-home" href="./" id="nav-check">
+        <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M3 6.5V4.5a1.5 1.5 0 0 1 1.5-1.5h2M13.5 3h2A1.5 1.5 0 0 1 17 4.5v2M17 13.5v2a1.5 1.5 0 0 1-1.5 1.5h-2M6.5 17h-2A1.5 1.5 0 0 1 3 15.5v-2M6.5 8h7v4h-7z M3 10h3.5M13.5 10H17" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Проверки</span>
       </a>
-      <nav class="topbar__nav" aria-label="Разделы">
-        <a class="navlink" href="#history-section">История проверок</a>
-        <button type="button" class="btn btn--ghost-light" id="rules-open">
-          <svg viewBox="0 0 20 20" aria-hidden="true" class="icon"><path d="M4 3.5h9l3 3V16.5H4z M13 3.5v3h3 M7 9.5h6 M7 12.5h6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
-          <span class="btn-label">Нормативная база</span>
-        </button>
-      </nav>
+      <a class="nav-item" href="#history-section">
+        <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M3.5 10a6.5 6.5 0 1 0 1.9-4.6M3.5 3.5v3.2h3.2M10 6.5V10l2.5 1.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>История</span>
+        <span class="nav-count" id="nav-count" aria-label="Число проверок">—</span>
+      </a>
+      <button type="button" class="nav-item" id="rules-open">
+        <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M5 2.5h7l3 3v12H5z M12 2.5v3h3 M7.5 9.5h5 M7.5 12.5h5 M7.5 15h3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg>
+        <span>Нормативная база</span>
+      </button>
+    </nav>
+
+    <div class="sidebar-bottom">
+      <div class="privacy-icon" aria-hidden="true">
+        <svg viewBox="0 0 20 20" class="icon"><path d="M10 2.5l6 2.4v4.4c0 4-2.6 7-6 8.2-3.4-1.2-6-4.2-6-8.2V4.9z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M7.3 10l2 2 3.6-3.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <strong>Обработка на устройстве</strong>
+      <p>Видео анализируется локально, без облачных сервисов. Распознавание лиц не используется.</p>
+      <div class="sidebar-foot">Datathon 26<span>Командный прототип для ForteBank</span></div>
     </div>
-  </header>
+  </aside>
 
-  <main id="main" class="container">
-    <!-- Upload -->
-    <section class="card upload-card" id="upload-section" aria-labelledby="upload-title">
-      <div class="card__head">
-        <div>
-          <h1 class="card__title" id="upload-title">Новая проверка</h1>
-          <p class="card__hint">Загрузите видеозапись с камеры кассового помещения. Система проверит соблюдение регламента и сформирует отчёт с доказательствами.</p>
+  <div class="shell">
+    <header class="topbar">
+      <a class="mobile-brand js-home" href="./" aria-label="Forte Cash Monitor — новая проверка">
+        <img src="assets/brand/forte-magenta.svg" width="84" height="25" alt="Forte">
+        <span>Cash Monitor</span>
+      </a>
+      <div class="breadcrumb" aria-label="Расположение">
+        <span>Рабочее пространство</span><span class="breadcrumb__sep" aria-hidden="true">/</span><span>Проверки</span><span class="breadcrumb__sep" aria-hidden="true">/</span><strong id="crumb-current">Новая проверка</strong>
+      </div>
+      <div class="topbar__actions">
+        <span class="server-status" id="server-status" role="status" title="Состояние локального сервиса">
+          <i aria-hidden="true"></i><span id="server-status-text">Проверяем сервер…</span>
+        </span>
+        <a class="icon-btn topbar__mobile" href="#history-section" aria-label="История проверок">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 10a6.5 6.5 0 1 0 1.9-4.6M3.5 3.5v3.2h3.2M10 6.5V10l2.5 1.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </a>
+        <button type="button" class="icon-btn topbar__mobile" data-rules-open aria-label="Нормативная база">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 2.5h7l3 3v12H5z M12 2.5v3h3 M7.5 9.5h5 M7.5 12.5h5 M7.5 15h3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/></svg>
+        </button>
+        <a class="logout-link" href="/logout" id="logout-link" title="Завершить сеанс">
+          <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M8 3.5H5A1.5 1.5 0 0 0 3.5 5v10A1.5 1.5 0 0 0 5 16.5h3M12.5 6.5L16 10l-3.5 3.5M16 10H8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span class="logout-link__label">Выйти</span>
+        </a>
+      </div>
+    </header>
+
+    <main id="main" class="container">
+      <div class="page-heading">
+        <div class="page-heading__text">
+          <div class="eyebrow">Видеоаналитика кассовых операций</div>
+          <h1 class="page-title">Каждое нарушение — с доказательством.</h1>
+          <p class="page-lead">Загрузите запись камеры кассового помещения: система найдёт отступления от регламента и покажет кадры, таймкоды и норму НБРК.</p>
         </div>
+        <a class="btn btn--secondary page-heading__new js-home" href="./" id="heading-new">
+          <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M10 4.5v11M4.5 10h11" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          <span class="btn-label">Новая проверка</span>
+        </a>
       </div>
 
-      <form id="upload-form" novalidate>
-        <label class="dropzone" id="dropzone" for="file-input">
-          <input type="file" id="file-input" name="file" accept=".mov,.mp4,video/quicktime,video/mp4" class="visually-hidden">
-          <svg class="dropzone__icon" viewBox="0 0 48 48" aria-hidden="true">
-            <rect x="6" y="11" width="28" height="26" rx="4" fill="none" stroke="currentColor" stroke-width="2.4"/>
-            <path d="M34 20l8-5v18l-8-5z" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/>
-            <path d="M20 30v-11m-4.5 4.5L20 19l4.5 4.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-          <span class="dropzone__primary">Перетащите видеофайл сюда или <span class="dropzone__link">выберите на компьютере</span></span>
-          <span class="dropzone__secondary">Форматы .mov и .mp4, до 200 МБ</span>
-        </label>
-
-        <div class="file-row" id="file-row" hidden>
-          <svg viewBox="0 0 24 24" class="file-row__icon" aria-hidden="true"><rect x="3" y="5" width="13" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M16 10l5-3v10l-5-3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
-          <div class="file-row__meta">
-            <div class="file-row__name" id="file-name"></div>
-            <div class="file-row__size" id="file-size"></div>
-          </div>
-          <button type="button" class="btn btn--text" id="file-clear">Убрать</button>
+      <!-- Service readiness (driven by /healthz) -->
+      <div class="readiness" id="readiness" role="status" aria-live="polite" hidden>
+        <span class="readiness__icon" aria-hidden="true">
+          <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10 6v5m0 2.6v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </span>
+        <div class="readiness__body">
+          <strong id="readiness-title"></strong>
+          <span id="readiness-text"></span>
         </div>
-
-        <p class="form-error" id="upload-error" role="alert" hidden></p>
-
-        <div class="form-actions">
-          <button type="submit" class="btn btn--primary" id="submit-btn" disabled>
-            <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M4.5 10.5l3.5 3.5 7.5-8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            Проверить
-          </button>
-        </div>
-      </form>
-    </section>
-
-    <!-- Progress -->
-    <section class="card progress-card" id="progress-section" aria-live="polite" hidden>
-      <div class="progress-card__row">
-        <div class="spinner" aria-hidden="true"></div>
-        <div class="progress-card__body">
-          <div class="progress-card__title" id="progress-title">Загрузка видео…</div>
-          <div class="progress-card__stage" id="progress-stage"></div>
-        </div>
-        <div class="progress-card__stats">
-          <div class="progress-card__pct" id="progress-pct">0%</div>
-          <div class="progress-card__elapsed">Прошло: <span id="progress-elapsed">0:00</span></div>
-        </div>
-      </div>
-      <div class="bar" role="progressbar" aria-labelledby="progress-title" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress-bar">
-        <div class="bar__fill" id="progress-fill"></div>
-      </div>
-      <div class="steps" aria-hidden="true">
-        <span class="step" id="step-upload">1. Загрузка</span>
-        <span class="step" id="step-analyze">2. Анализ</span>
-        <span class="step" id="step-report">3. Отчёт</span>
-      </div>
-    </section>
-
-    <!-- Failed -->
-    <section class="card error-card" id="error-section" role="alert" hidden>
-      <svg viewBox="0 0 24 24" class="error-card__icon" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v6m0 3.5v.5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
-      <div class="error-card__body">
-        <h2 class="error-card__title">Не удалось выполнить проверку</h2>
-        <p class="error-card__text" id="error-text"></p>
-        <div class="error-card__actions">
-          <button type="button" class="btn btn--primary" id="retry-btn">Повторить</button>
-          <button type="button" class="btn btn--secondary" id="new-check-btn-err">Новая проверка</button>
-        </div>
-      </div>
-    </section>
-
-    <!-- Result -->
-    <section id="result-section" class="result" hidden aria-labelledby="verdict-title">
-      <div class="verdict" id="verdict">
-        <div class="verdict__icon" id="verdict-icon" aria-hidden="true"></div>
-        <div class="verdict__body">
-          <h2 class="verdict__title" id="verdict-title"></h2>
-          <div class="verdict__meta" id="verdict-meta"></div>
-        </div>
-        <div class="verdict__actions">
-          <button type="button" class="btn btn--secondary btn--sm" id="copy-link-btn">Скопировать ссылку</button>
-          <button type="button" class="btn btn--secondary btn--sm" id="new-check-btn">Новая проверка</button>
-        </div>
-      </div>
-      <div class="notice notice--warn" id="partial-note" hidden>
-        <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M10 2.5l8 14H2z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M10 8v4m0 2.2v.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-        <span>Анализ остановлен по лимиту времени — результат может быть неполным. Показаны нарушения, обнаруженные до остановки.</span>
-      </div>
-      <div class="notice notice--warn notice--list" id="warnings-note" role="note" aria-labelledby="warnings-title" hidden>
-        <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M10 2.5l8 14H2z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M10 8v4m0 2.2v.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-        <div>
-          <strong class="notice__title" id="warnings-title">Предупреждения</strong>
-          <ul class="notice__items" id="warnings-list"></ul>
-        </div>
-      </div>
-
-      <div class="result__grid">
-        <div class="player card">
-          <div class="player__frame">
-            <video id="video" controls preload="metadata" playsinline></video>
-          </div>
-          <div class="timeline-wrap">
-            <div class="timeline" id="timeline" aria-label="Шкала времени с отметками нарушений">
-              <div class="timeline__played" id="timeline-played"></div>
-              <div class="timeline__markers" id="timeline-markers"></div>
-              <div class="timeline__head" id="timeline-head"></div>
-            </div>
-            <div class="timeline__labels"><span id="tl-start">0:00</span><span id="tl-end">—</span></div>
-          </div>
-          <dl class="meta-list" id="video-meta"></dl>
-        </div>
-
-        <div class="violations">
-          <div class="violations__head">
-            <h3 class="section-title" id="violations-title">Выявленные нарушения</h3>
-          </div>
-          <div id="violations-list" class="violations__list"></div>
-        </div>
-      </div>
-    </section>
-
-    <!-- History -->
-    <section class="card history" id="history-section" aria-labelledby="history-title">
-      <div class="card__head card__head--row">
-        <h2 class="card__title" id="history-title">История проверок</h2>
-        <button type="button" class="btn btn--text" id="history-refresh">
+        <button type="button" class="btn btn--text readiness__retry" id="readiness-retry">
           <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M16 10a6 6 0 1 1-1.8-4.3M16 3.5v3h-3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
           Обновить
         </button>
       </div>
-      <div class="table-wrap">
-        <table class="table" id="history-table">
-          <thead>
-            <tr>
-              <th scope="col">Дата и время</th>
-              <th scope="col">Файл</th>
-              <th scope="col" class="col-hide-sm">Статус</th>
-              <th scope="col">Результат</th>
-              <th scope="col" class="num col-hide-sm">Нарушений</th>
-            </tr>
-          </thead>
-          <tbody id="history-body"></tbody>
-        </table>
-      </div>
-      <p class="empty" id="history-empty" hidden>Проверок пока нет. Загрузите первое видео, чтобы начать.</p>
-    </section>
-  </main>
 
-  <footer class="footer">
-    <div class="footer__inner">
-      <span class="footer__lock">
-        <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><rect x="4" y="9" width="12" height="8.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 9V6.5a3 3 0 0 1 6 0V9" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
-        Все вычисления выполняются локально. Распознавание лиц не используется.
-      </span>
-      <span class="footer__muted">Для внутреннего использования</span>
-    </div>
-  </footer>
+      <!-- Upload -->
+      <section class="workspace-grid" id="upload-section" aria-label="Новая проверка">
+        <div class="card panel upload-card">
+          <div class="panel__head">
+            <h2 class="panel__title" id="upload-title"><span class="section-number">01</span> Видеозапись</h2>
+            <span class="subtle-label">Источник</span>
+          </div>
+          <form id="upload-form" class="panel__body" novalidate>
+            <label class="dropzone" id="dropzone" for="file-input">
+              <input type="file" id="file-input" name="file" accept=".mov,.mp4,video/quicktime,video/mp4" class="visually-hidden">
+              <span class="upload-illustration" aria-hidden="true">
+                <span class="upload-illustration__card">
+                  <svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 9.5v5l4-2.5z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+                </span>
+                <span class="upload-illustration__plus">
+                  <svg viewBox="0 0 20 20"><path d="M10 5v10M5 10h10" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+                </span>
+              </span>
+              <span class="dropzone__primary">Начните с видеозаписи</span>
+              <span class="dropzone__secondary">Перетащите файл сюда или выберите его на устройстве</span>
+              <span class="btn btn--dark dropzone__btn">Выбрать видео</span>
+              <span class="dropzone__hint">MOV или MP4 · до 200 МБ</span>
+            </label>
+
+            <div class="file-row" id="file-row" hidden>
+              <svg viewBox="0 0 24 24" class="file-row__icon" aria-hidden="true"><rect x="3" y="5" width="13" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M16 10l5-3v10l-5-3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+              <div class="file-row__meta">
+                <div class="file-row__label">Файл</div>
+                <div class="file-row__name" id="file-name"></div>
+                <div class="file-row__size" id="file-size"></div>
+              </div>
+              <button type="button" class="btn btn--text" id="file-clear">Убрать</button>
+            </div>
+
+            <p class="form-error" id="upload-error" role="alert" hidden></p>
+
+            <div class="form-actions">
+              <p class="form-actions__hint">Анализ выполняется на этом сервере. Время обработки по ТЗ — до 5 минут.</p>
+              <button type="submit" class="btn btn--primary" id="submit-btn" disabled>
+                Начать проверку
+                <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M4.5 10h11M11 5.5l4.5 4.5-4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+            </div>
+          </form>
+        </div>
+
+        <aside class="card panel preview-card" aria-labelledby="preview-title">
+          <div class="panel__head">
+            <h2 class="panel__title" id="preview-title"><span class="section-number">02</span> Результат проверки</h2>
+            <span class="status-tag">Ожидание</span>
+          </div>
+          <div class="panel__body result-empty">
+            <span class="empty-symbol" aria-hidden="true">
+              <svg viewBox="0 0 20 20"><path d="M3 6.5V4.5a1.5 1.5 0 0 1 1.5-1.5h2M13.5 3h2A1.5 1.5 0 0 1 17 4.5v2M17 13.5v2a1.5 1.5 0 0 1-1.5 1.5h-2M6.5 17h-2A1.5 1.5 0 0 1 3 15.5v-2M6.5 8h7v4h-7z M3 10h3.5M13.5 10H17" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            <h3 class="result-empty__title">От записи к фактам</h3>
+            <p class="result-empty__text">Здесь появятся выявленные нарушения: кадры с разметкой, фрагмент видео, таймкоды и пункт нормативного акта.</p>
+            <ol class="result-steps">
+              <li><span>1</span>Загрузите запись кассовой операции</li>
+              <li><span>2</span>Дождитесь локального анализа</li>
+              <li><span>3</span>Проверьте нарушения и сформируйте акт</li>
+            </ol>
+          </div>
+        </aside>
+      </section>
+
+      <!-- Progress -->
+      <section class="card panel progress-card" id="progress-section" aria-live="polite" hidden>
+        <div class="panel__head">
+          <h2 class="panel__title"><span class="section-number">02</span> Анализ записи</h2>
+          <span class="status-tag status-tag--processing"><i aria-hidden="true"></i>Обработка</span>
+        </div>
+        <div class="panel__body">
+          <div class="progress-card__row">
+            <div class="spinner" aria-hidden="true"></div>
+            <div class="progress-card__body">
+              <div class="progress-card__title" id="progress-title">Загрузка видео…</div>
+              <div class="progress-card__stage" id="progress-stage"></div>
+            </div>
+            <div class="progress-card__stats">
+              <div class="progress-card__pct" id="progress-pct">0%</div>
+              <div class="progress-card__elapsed">Прошло: <span id="progress-elapsed">0:00</span></div>
+            </div>
+          </div>
+          <div class="bar" role="progressbar" aria-labelledby="progress-title" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress-bar">
+            <div class="bar__fill" id="progress-fill"></div>
+          </div>
+          <div class="steps" aria-hidden="true">
+            <span class="step" id="step-upload"><b>1</b>Загрузка</span>
+            <span class="step" id="step-analyze"><b>2</b>Анализ</span>
+            <span class="step" id="step-report"><b>3</b>Отчёт</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Failed -->
+      <section class="card error-card" id="error-section" role="alert" hidden>
+        <svg viewBox="0 0 24 24" class="error-card__icon" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v6m0 3.5v.5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+        <div class="error-card__body">
+          <h2 class="error-card__title">Не удалось выполнить проверку</h2>
+          <p class="error-card__text" id="error-text"></p>
+          <div class="error-card__actions">
+            <button type="button" class="btn btn--primary" id="retry-btn">Повторить</button>
+            <button type="button" class="btn btn--secondary" id="new-check-btn-err">Новая проверка</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Result -->
+      <section id="result-section" class="result" hidden aria-labelledby="verdict-title">
+        <div class="verdict" id="verdict">
+          <div class="verdict__icon" id="verdict-icon" aria-hidden="true"></div>
+          <div class="verdict__body">
+            <h2 class="verdict__title" id="verdict-title"></h2>
+            <div class="verdict__meta" id="verdict-meta"></div>
+          </div>
+          <div class="verdict__actions">
+            <button type="button" class="btn btn--secondary btn--sm" id="copy-link-btn">Скопировать ссылку</button>
+          </div>
+        </div>
+        <div class="notice notice--warn" id="partial-note" hidden>
+          <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M10 2.5l8 14H2z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M10 8v4m0 2.2v.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          <span>Анализ остановлен по лимиту времени — результат может быть неполным. Показаны нарушения, обнаруженные до остановки.</span>
+        </div>
+        <div class="notice notice--warn notice--list" id="warnings-note" role="note" aria-labelledby="warnings-title" hidden>
+          <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M10 2.5l8 14H2z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M10 8v4m0 2.2v.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          <div>
+            <strong class="notice__title" id="warnings-title">Предупреждения</strong>
+            <ul class="notice__items" id="warnings-list"></ul>
+          </div>
+        </div>
+
+        <div class="result__grid">
+          <div class="player card panel">
+            <div class="panel__head panel__head--compact">
+              <h3 class="panel__title"><span class="section-number">01</span> Видеозапись</h3>
+            </div>
+            <div class="player__inner">
+              <div class="player__frame">
+                <video id="video" controls preload="metadata" playsinline></video>
+              </div>
+              <div class="timeline-wrap">
+                <div class="timeline-label">События на записи</div>
+                <div class="timeline" id="timeline" aria-label="Шкала времени с отметками нарушений">
+                  <div class="timeline__played" id="timeline-played"></div>
+                  <div class="timeline__markers" id="timeline-markers"></div>
+                  <div class="timeline__head" id="timeline-head"></div>
+                </div>
+                <div class="timeline__labels"><span id="tl-start">0:00</span><span id="tl-end">—</span></div>
+              </div>
+              <dl class="meta-list" id="video-meta"></dl>
+            </div>
+          </div>
+
+          <div class="violations">
+            <section class="card review-panel" id="review-panel" aria-labelledby="review-title" hidden></section>
+            <div class="violations__head">
+              <h3 class="section-title"><span class="section-number">02</span> <span id="violations-title">Выявленные нарушения</span></h3>
+            </div>
+            <div id="violations-list" class="violations__list"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- History -->
+      <section class="card panel history" id="history-section" aria-labelledby="history-title">
+        <div class="panel__head">
+          <h2 class="panel__title" id="history-title"><span class="section-number">03</span> История проверок</h2>
+          <button type="button" class="btn btn--text" id="history-refresh">
+            <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><path d="M16 10a6 6 0 1 1-1.8-4.3M16 3.5v3h-3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Обновить
+          </button>
+        </div>
+        <div class="table-wrap">
+          <table class="table" id="history-table">
+            <thead>
+              <tr>
+                <th scope="col">Дата и время</th>
+                <th scope="col">Файл</th>
+                <th scope="col" class="col-hide-sm">Статус</th>
+                <th scope="col">Результат</th>
+                <th scope="col" class="num col-hide-sm">Нарушений</th>
+              </tr>
+            </thead>
+            <tbody id="history-body"></tbody>
+          </table>
+        </div>
+        <p class="empty" id="history-empty" hidden>Проверок пока нет. Загрузите первое видео, чтобы начать.</p>
+      </section>
+
+      <footer class="page-footer">
+        <span class="page-footer__lock">
+          <svg viewBox="0 0 20 20" class="icon" aria-hidden="true"><rect x="4" y="9" width="12" height="8.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 9V6.5a3 3 0 0 1 6 0V9" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+          Все вычисления выполняются локально. Распознавание лиц не используется. Результат — подсказка для проверки специалистом.
+        </span>
+        <span class="page-footer__muted">Forte Cash Monitor · Datathon 26 · Для внутреннего использования</span>
+      </footer>
+    </main>
+  </div>
 
   <!-- Rules modal -->
   <dialog class="modal" id="rules-modal" aria-labelledby="rules-title">
     <div class="modal__head">
-      <h2 class="modal__title" id="rules-title">Нормативная база</h2>
+      <div>
+        <div class="eyebrow">Нормативные основания · РК</div>
+        <h2 class="modal__title" id="rules-title">Нормативная база</h2>
+      </div>
       <button type="button" class="icon-btn" data-close aria-label="Закрыть">
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
       </button>

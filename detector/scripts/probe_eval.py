@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from forte_detector import config  # noqa: E402
 from forte_detector.labels import load_labels  # noqa: E402
-from forte_detector.probes import runner  # noqa: E402
+from forte_detector.probes import questions, runner  # noqa: E402
 from forte_detector.probes.base import ProbeRequest  # noqa: E402
 
 CASES = config.PACKAGE_DIR / "data" / "probe_cases.json"
@@ -102,7 +102,8 @@ def main() -> None:
             tl = perceive(path)
         t_perc = time.perf_counter() - t0
         t0 = time.perf_counter()
-        needs_cal = any(c["cue"] in ("door_open", "safe_open", "key_in_safe", "screen_on_unlocked") for c in vcases)
+        needs_cal = any(c["cue"] == "door_open" or (c["cue"] in questions.SPECS and questions.SPECS[c["cue"]].roi)
+                        for c in vcases)
         cal = runner.calibrate(path, tl) if needs_cal else {}
         t_cal = time.perf_counter() - t0
         if needs_cal:
