@@ -46,6 +46,17 @@ const el = (tag, className, text) => {
   if (text !== undefined) node.textContent = text;
   return node;
 };
+function visualIcon(name, danger = false) {
+  const box = el("div", danger ? "empty-symbol danger" : "empty-symbol");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("icon");
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", `/static/icons.svg#${name}`);
+  svg.append(use);
+  box.append(svg);
+  return box;
+}
 function toast(message) {
   $("toast").textContent = message;
   $("toast").hidden = false;
@@ -211,7 +222,7 @@ function resetWorkspace() {
   $("result-body").replaceChildren();
   const box = el("div", "result-empty");
   box.append(
-    el("div", "empty-symbol", "⌁"),
+    visualIcon("scan"),
     el("h3", "", "Готовы к новой проверке"),
     el(
       "p",
@@ -361,7 +372,7 @@ function renderJob() {
     badge("Не завершена", "failed");
     const box = el("div", "result-empty");
     box.append(
-      el("div", "empty-symbol", "!"),
+      visualIcon("alert", true),
       el("h3", "", "Проверка не завершена"),
       el("p", "", result.error.message),
       el("p", "", "Ошибка обработки не означает, что нарушение отсутствует."),

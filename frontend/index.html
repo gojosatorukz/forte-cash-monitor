@@ -15,33 +15,76 @@
   <body>
     <a class="skip-link" href="#workspace">Перейти к проверке</a>
     <aside class="sidebar">
-      <a class="brand" href="/" aria-label="Forte Cash Monitor — главная"
-        ><span class="brand-mark">f<span>·</span></span
-        ><span>forte<span class="brand-sub">cash monitor</span></span></a
-      >
+      <a class="brand" href="/" aria-label="Forte Cash Monitor — главная">
+        <img
+          class="brand-logo"
+          src="/static/brand/forte-magenta.svg"
+          width="142"
+          height="42"
+          alt="Forte"
+        />
+        <img
+          class="brand-icon"
+          src="/static/favicon.svg"
+          width="40"
+          height="40"
+          alt="Forte"
+        />
+      </a>
+      <div class="product-name">
+        Cash Monitor<span>КОНТРОЛЬ КАССОВЫХ ОПЕРАЦИЙ</span>
+      </div>
       <div class="sidebar-label">РАБОЧЕЕ ПРОСТРАНСТВО</div>
       <nav aria-label="Основная навигация">
         <a class="nav-item active" href="#workspace"
-          ><span aria-hidden="true">▣</span> Проверки
-          <span class="nav-count" id="nav-count">—</span></a
+          ><span aria-hidden="true"
+            ><svg class="icon" aria-hidden="true">
+              <use href="/static/icons.svg#scan"></use></svg
+          ></span>
+          Проверки <span class="nav-count" id="nav-count">—</span></a
         >
         <button class="nav-item" id="rules-button">
-          <span aria-hidden="true">▤</span> Нормативная база
+          <span aria-hidden="true"
+            ><svg class="icon" aria-hidden="true">
+              <use href="/static/icons.svg#rules"></use></svg
+          ></span>
+          Нормативная база
         </button>
         <a class="nav-item" href="/docs"
-          ><span aria-hidden="true">⌘</span> Документация API
+          ><span aria-hidden="true"
+            ><svg class="icon" aria-hidden="true">
+              <use href="/static/icons.svg#code"></use></svg
+          ></span>
+          Документация API
           <span class="nav-arrow" aria-hidden="true">↗</span></a
         >
       </nav>
       <div class="sidebar-bottom">
-        <div class="privacy-icon" aria-hidden="true">◈</div>
+        <div class="privacy-icon" aria-hidden="true">
+          <svg class="icon" aria-hidden="true">
+            <use href="/static/icons.svg#shield"></use>
+          </svg>
+        </div>
         <strong>Обработка на устройстве</strong>
         <p>Видео анализируются локально. Без идентификации лиц.</p>
-        <div class="sidebar-foot">DATATHON 26 <span>FORTEBANK CASE</span></div>
+        <div class="sidebar-foot">
+          DATATHON 26 <span>КОМАНДНЫЙ ПРОТОТИП ДЛЯ FORTEBANK</span>
+        </div>
       </div>
     </aside>
     <div class="shell">
       <header class="topbar">
+        <a
+          class="mobile-brand"
+          href="/"
+          aria-label="Forte Cash Monitor — главная"
+          ><img
+            src="/static/brand/forte-magenta.svg"
+            width="90"
+            height="27"
+            alt="Forte"
+          /><span>Cash Monitor</span></a
+        >
         <div class="breadcrumb">
           Рабочее пространство <span>/</span> <strong>Проверки</strong>
         </div>
@@ -66,7 +109,11 @@
             </p>
           </div>
           <button id="new-check" class="button secondary">
-            <span aria-hidden="true">＋</span> Новая проверка
+            <span aria-hidden="true"
+              ><svg class="icon" aria-hidden="true">
+                <use href="/static/icons.svg#plus"></use></svg
+            ></span>
+            Новая проверка
           </button>
         </div>
         <div id="readiness" class="readiness" role="status">
@@ -75,7 +122,13 @@
             <strong id="readiness-title">Проверяем готовность</strong
             ><span id="readiness-text">Соединяемся с локальным сервисом…</span>
           </div>
-          <button id="refresh-service" class="text-button">Обновить ↻</button>
+          <button
+            id="refresh-service"
+            class="text-button"
+            aria-label="Обновить готовность сервиса"
+          >
+            Обновить ↻
+          </button>
         </div>
         <div class="workspace-grid">
           <section class="panel source-panel" aria-labelledby="source-heading">
@@ -95,8 +148,15 @@
             <div class="video-area" id="video-area">
               <div class="dropzone" id="dropzone">
                 <div class="upload-illustration" aria-hidden="true">
-                  <div class="video-symbol">▶</div>
-                  <span class="upload-plus">＋</span>
+                  <div class="video-symbol">
+                    <svg class="icon" aria-hidden="true">
+                      <use href="/static/icons.svg#video"></use>
+                    </svg>
+                  </div>
+                  <span class="upload-plus"
+                    ><svg class="icon" aria-hidden="true">
+                      <use href="/static/icons.svg#plus"></use></svg
+                  ></span>
                 </div>
                 <h3>Начните с видеозаписи</h3>
                 <p>Перетащите файл сюда или выберите его на устройстве</p>
@@ -161,7 +221,11 @@
             </div>
             <div class="result-body" id="result-body" aria-live="polite">
               <div class="result-empty">
-                <div class="empty-symbol" aria-hidden="true">⌁</div>
+                <div class="empty-symbol" aria-hidden="true">
+                  <svg class="icon" aria-hidden="true">
+                    <use href="/static/icons.svg#scan"></use>
+                  </svg>
+                </div>
                 <h3>От записи к фактам</h3>
                 <p>
                   Здесь появятся обнаруженные события, исходные кадры и
@@ -199,7 +263,10 @@
             <button id="refresh-history" class="text-button">Обновить ↻</button>
           </div>
           <div id="history-locked" class="history-empty">
-            <span aria-hidden="true">◷</span>
+            <span aria-hidden="true"
+              ><svg class="icon" aria-hidden="true">
+                <use href="/static/icons.svg#history"></use></svg
+            ></span>
             <p>Подключите ключ, чтобы увидеть проверки этого сервиса.</p>
           </div>
           <div class="table-scroll" id="history-table-wrap" hidden>
