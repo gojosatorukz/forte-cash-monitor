@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "forte-cash-monitor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local cash-operation video review service for Datathon 26"
 requires-python = ">=3.11"
 dependencies = [

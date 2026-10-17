@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     max_upload_mb: int = Field(default=64, ge=1, le=512)
     max_active_jobs: int = Field(default=4, ge=1, le=16)
     job_budget_sec: float = Field(default=270, gt=0, le=290)
+    retention_hours: int = Field(default=24, ge=1, le=168)
+    upload_timeout_sec: int = Field(default=60, ge=5, le=300)
     analyzer_factory: str = ""
 
     @field_validator("api_key")

@@ -19,6 +19,8 @@ class EvidenceFrame(StrictModel):
     @field_validator("image_base64")
     @classmethod
     def require_jpeg_envelope(cls, value: str) -> str:
+        if len(value) > 4 * ((8 * 1024 * 1024 + 2) // 3):
+            raise ValueError("Each evidence JPEG must be at most 8 MiB")
         try:
             data = base64.b64decode(value, validate=True)
         except (ValueError, binascii.Error) as exc:
@@ -80,3 +82,28 @@ class FailedJob(CreatedJob):
 
 
 JobResponse = Annotated[ProcessingJob | DoneJob | FailedJob, Field(discriminator="status")]
+
+
+class JobSummary(StrictModel):
+    job_id: UUID
+    filename: str
+    status: Literal["processing", "done", "failed"]
+    stage: str
+    created_at: float
+    started_at: float | None
+    finished_at: float | None
+    size_bytes: int
+    verdict: Literal["violation", "no_violation"] | None = None
+    event_count: int | None = None
+
+
+class JobPage(StrictModel):
+    items: list[JobSummary]
+    total: int
+    limit: int
+    offset: int
+
+
+class JobDetails(StrictModel):
+    summary: JobSummary
+    result: JobResponse

@@ -5,9 +5,14 @@ from pathlib import Path
 
 from backend.app.schemas import AnalysisResult
 from backend.app.store import JobStore
-from inference.base import AnalysisRequest, Analyzer
+from inference.base import AnalysisFailure, AnalysisRequest, Analyzer
 
 logger = logging.getLogger(__name__)
+FAILURE_MESSAGES = {
+    "invalid_video": "Видео повреждено или не содержит доступной видеодорожки.",
+    "unsupported_codec": "Локальный декодер не поддерживает кодек этого видео.",
+    "deadline_exceeded": "Истёк бюджет времени задачи.",
+}
 
 
 class Worker:
@@ -17,6 +22,12 @@ class Worker:
         self.budget_sec = budget_sec
         self.stopping = asyncio.Event()
         self.wakeup = asyncio.Event()
+        self.active_id: str | None = None
+        self.deadline: float | None = None
+
+    @property
+    def stalled(self) -> bool:
+        return self.deadline is not None and time.monotonic() > self.deadline
 
     async def run(self) -> None:
         while not self.stopping.is_set():
@@ -30,21 +41,31 @@ class Worker:
                 continue
             remaining = self.budget_sec - (time.time() - job["created_at"])
             if remaining <= 0:
-                self.fail(job["id"], "deadline_exceeded", "Истёк бюджет времени задачи.")
+                self.fail(job["id"], "deadline_exceeded", FAILURE_MESSAGES["deadline_exceeded"])
                 continue
-            deadline = time.monotonic() + remaining
-            request = AnalysisRequest(Path(job["path"]), deadline)
+            self.active_id = job["id"]
+            self.deadline = time.monotonic() + remaining
+            request = AnalysisRequest(
+                Path(job["path"]),
+                self.deadline,
+                report_progress=lambda stage, job_id=job["id"]: self.store.progress(job_id, stage),
+            )
             try:
-                # One GPU job at a time; the HTTP event loop remains responsive.
                 raw = await asyncio.to_thread(self.analyzer.analyze, request)
                 result = AnalysisResult.model_validate(raw)
-                if time.monotonic() > deadline:
-                    self.fail(job["id"], "deadline_exceeded", "Истёк бюджет времени задачи.")
+                if time.monotonic() > self.deadline:
+                    self.fail(job["id"], "deadline_exceeded", FAILURE_MESSAGES["deadline_exceeded"])
                 else:
                     self.store.finish(job["id"], "done", result.model_dump(mode="json"))
+            except AnalysisFailure as exc:
+                code = exc.code if exc.code in FAILURE_MESSAGES else "analysis_failed"
+                self.fail(job["id"], code, FAILURE_MESSAGES.get(code, "Ошибка анализа видео."))
             except Exception:
                 logger.exception("Local analysis failed for job %s", job["id"])
                 self.fail(job["id"], "analysis_failed", "Не удалось проанализировать видео.")
+            finally:
+                self.active_id = None
+                self.deadline = None
 
     def fail(self, job_id: str, code: str, message: str) -> None:
         self.store.finish(job_id, "failed", {"code": code, "message": message})

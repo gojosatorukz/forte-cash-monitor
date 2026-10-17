@@ -1,21 +1,132 @@
 <!doctype html>
 <html lang="ru">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>API · Forte Cash Monitor</title><link rel="stylesheet" href="/static/app.css"></head>
-<body>
-<header><a class="brand" href="/">← Forte Cash Monitor</a><a href="/openapi.json">OpenAPI JSON ↗</a></header>
-<main class="api-page">
-  <div class="eyebrow">КОНТРАКТ DATATHON 26</div>
-  <h1>API сервиса</h1>
-  <div class="notice warning">Это рабочая основа. Пока локальная модель не подключена, загрузка возвращает 503, а не выдуманный результат анализа.</div>
-  <h2>Создать задачу</h2><p><code>POST /api/v1/analyze</code> · multipart-поле <code>file</code> · MOV · заголовок <code>X-API-Key</code>.</p>
-  <pre>curl -X POST http://127.0.0.1:8000/api/v1/analyze \
-  -H "X-API-Key: YOUR_LOCAL_KEY" \
-  -F "file=@/path/to/video.mov"</pre>
-  <p>После подключения модели: HTTP 202 и <code>{"job_id":"…"}</code>.</p>
-  <h2>Получить состояние</h2><pre>curl http://127.0.0.1:8000/api/v1/jobs/JOB_ID \
-  -H "X-API-Key: YOUR_LOCAL_KEY"</pre>
-  <p>Статусы: <code>processing</code>, <code>done</code>, <code>failed</code>. Только завершённый анализ возвращает <code>verdict</code> и <code>violations</code>.</p>
-  <h2>Готовность</h2><p><a href="/healthz">/healthz</a> — сервер запущен. <a href="/readyz">/readyz</a> — готов ли анализатор. HTTP 503 при неподключённой модели ожидаем.</p>
-  <p>Документация и интерфейс используют только локальные файлы, без внешних шрифтов и CDN.</p>
-</main>
-</body></html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>API · Forte Cash Monitor</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <header class="api-header">
+      <a class="brand" href="/">← Forte Cash Monitor</a
+      ><a href="/openapi.json">OpenAPI JSON ↗</a>
+    </header>
+    <main class="api-page">
+      <div class="eyebrow">DATATHON 26 · КОНТРАКТ ДЛЯ ЖЮРИ</div>
+      <h1>Один API.<br />От видео до доказательств.</h1>
+      <p>
+        Все пути <code>/api/v1/*</code> требуют заголовок
+        <code>X-API-Key</code>. Значение передаётся жюри отдельно. Ключ не
+        передаётся в URL.
+      </p>
+      <p class="api-note">
+        Готовность сервера и модели проверяется отдельно:
+        <a href="/readyz">/readyz</a>. Без подключённой модели создание задачи
+        возвращает 503. Неполная или ошибочная обработка не выдаёт вердикт.
+      </p>
+      <h2>01 · Загрузить видео</h2>
+      <p>
+        <code>POST /api/v1/analyze</code> · multipart-поле <code>file</code> ·
+        MOV. Ограничение файла по умолчанию — 64 МиБ.
+      </p>
+      <pre>
+curl -X POST http://127.0.0.1:8000/api/v1/analyze \
+  -H "X-API-Key: YOUR_KEY" \
+  -F "file=@/path/to/video.mov"</pre
+      >
+      <p>HTTP 202:</p>
+      <pre>{"job_id":"3f2a9c1e-2338-4f74-b886-30f63edec541"}</pre>
+      <h2>02 · Получить результат</h2>
+      <pre>
+curl http://127.0.0.1:8000/api/v1/jobs/JOB_ID \
+  -H "X-API-Key: YOUR_KEY"</pre
+      >
+      <p>Пока идёт обработка:</p>
+      <pre>{"job_id":"…","status":"processing"}</pre>
+      <p>После завершения:</p>
+      <pre>
+{
+  "job_id": "…",
+  "status": "done",
+  "verdict": "violation",
+  "violations": [{
+    "type": "Название наблюдаемого сценария",
+    "timecode_sec": 44.2,
+    "description": "Факты, условия и нормативное основание РК",
+    "evidence_frames": [
+      {"timestamp_sec": 44.2, "image_base64": "JPEG_BASE64"}
+    ]
+  }]
+}</pre
+      >
+      <p>
+        Пример показывает структуру, а не результат реального видео. Для
+        <code>no_violation</code> список <code>violations</code> пуст. На
+        событие возвращается 1–3 настоящих JPEG. Время — секунды от начала
+        исходной записи; base64 без префикса data URL. Источник нормы, пункт и
+        ограничения вывода указываются в описании события.
+      </p>
+      <p>
+        При ошибке — HTTP 200 с <code>status: failed</code>, объектом
+        <code>error</code> (code, message) и без verdict. Бюджет по умолчанию —
+        270 секунд, включая очередь; лимит ТЗ — 5 минут. Опрос — каждые 1–2
+        секунды.
+      </p>
+      <h2>Дополнительные методы интерфейса</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>GET</th>
+            <th>Назначение</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>/api/v1/service</code></td>
+            <td>Готовность, лимиты, очередь</td>
+          </tr>
+          <tr>
+            <td><code>/api/v1/jobs?limit=10&amp;offset=0</code></td>
+            <td>История без base64 кадров</td>
+          </tr>
+          <tr>
+            <td><code>/api/v1/jobs/{id}/details</code></td>
+            <td>Имя файла, этап, время и результат</td>
+          </tr>
+          <tr>
+            <td><code>/api/v1/jobs/{id}/video</code></td>
+            <td>Исходное видео</td>
+          </tr>
+          <tr>
+            <td><code>/api/v1/jobs/{id}/report?format=json</code></td>
+            <td>Экспорт ответа по контракту</td>
+          </tr>
+          <tr>
+            <td><code>/api/v1/jobs/{id}/report?format=html</code></td>
+            <td>Автономный отчёт с кадрами; печать в PDF</td>
+          </tr>
+          <tr>
+            <td><code>/api/v1/rules</code></td>
+            <td>Каталог условий и исключений</td>
+          </tr>
+        </tbody>
+      </table>
+      <h2>Ошибки запроса</h2>
+      <p>
+        401 — ключ; 404 — задача или файл; 408 — время загрузки; 413 — размер;
+        415 — формат; 422 — параметры; 429 — очередь; 503 — анализатор не готов.
+        Сетевой сбой при загрузке не гарантирует, что задача не была создана:
+        сначала проверьте историю, затем повторяйте загрузку.
+      </p>
+      <h2>Данные и доступ</h2>
+      <p>
+        По умолчанию завершённые проверки и исходные загрузки удаляются через 24
+        часа. Один ключ даёт доступ ко всей истории сервиса; это командный
+        прототип, без отдельных аккаунтов пользователей. Интерфейс, справка и
+        отчёты используют локальные ресурсы.
+        <a href="/">Вернуться к проверкам →</a>
+      </p>
+    </main>
+  </body>
+</html>
