@@ -11,7 +11,7 @@ from typing import Annotated
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Security, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 
@@ -285,6 +285,10 @@ def create_app(settings: Settings | None = None, analyzer: Analyzer | None = Non
     @app.get("/docs", include_in_schema=False)
     async def docs():
         return FileResponse(FRONTEND_DIR / "api.html")
+
+    @app.get("/robots.txt", include_in_schema=False, response_class=PlainTextResponse)
+    async def robots():
+        return "User-agent: *\nDisallow: /\n"
 
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR / "static"), name="static")
     return app

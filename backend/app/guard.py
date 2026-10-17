@@ -12,6 +12,7 @@ SECURITY_HEADERS = [
     (b"referrer-policy", b"no-referrer"),
     (b"x-frame-options", b"DENY"),
     (b"cache-control", b"no-store"),
+    (b"x-robots-tag", b"noindex, nofollow, nosnippet"),
     (
         b"content-security-policy",
         (

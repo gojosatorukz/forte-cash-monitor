@@ -25,5 +25,6 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: node --check frontend/static/app.js
+      - run: node --check frontend/static/docs.js
       - run: pytest -q
       # Only synthetic test fixtures run here. No competition media or models.
