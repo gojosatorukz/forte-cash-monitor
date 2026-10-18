@@ -1,0 +1,45 @@
+# Reverse SSH tunnel to the team server (primary public URL https://forte.incode.kz). Install: README, "Релей".
+# The server's 127.0.0.1:18000 is forwarded to THIS machine's 127.0.0.1:8000 (Docker app or run.sh); the server's
+# Caddy/nginx proxies forte.incode.kz to it. Independent of the app unit and of Docker (no PartOf=/BindsTo=):
+# restarting the app does not drop the tunnel, and while the app is down the server simply answers 502.
+# Needs: sudo apt install autossh; a dedicated key without passphrase (ssh-keygen -t ed25519 -N "" -f ...);
+# the server's host key pinned in KNOWN_HOSTS (ssh-keyscan once, compare the fingerprint). With a non-22
+# RELAY_SSH_PORT scan with `ssh-keyscan -p <port>`: the entry is then written as [host]:port, which is what ssh
+# looks up for that port. The server needs deploy/relay/sshd-forte-relay.conf (REQUIRED, see README).
+# Edit User=, Group= and the Environment= values below.
+[Unit]
+Description=Reverse SSH tunnel forte.incode.kz -> local 127.0.0.1:8000
+Wants=network-online.target
+After=network-online.target
+# Retry forever: never give up after a burst of failures (network down at boot, server rebooting).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=forte
+Group=forte
+Environment=RELAY_HOST=89.126.193.108
+Environment=RELAY_USER=forte-relay
+Environment=RELAY_SSH_PORT=22
+Environment=RELAY_KEY=/home/forte/.ssh/forte_relay
+Environment=RELAY_KNOWN_HOSTS=/home/forte/.ssh/known_hosts_forte_relay
+Environment=REMOTE_LISTEN=127.0.0.1:18000
+Environment=LOCAL_TARGET=127.0.0.1:8000
+# -M 0: no autossh monitor port; ssh's own ServerAlive* detects a dead link (~45 s) and exits, autossh/systemd
+# reconnect. ExitOnForwardFailure: if the remote port cannot be bound, exit and retry instead of idling.
+# AUTOSSH_GATETIME=0: keep retrying even if the very first connection fails (e.g. at boot).
+Environment=AUTOSSH_GATETIME=0
+# How often autossh checks its ssh child (seconds); the default 600 s only matters with a monitor port.
+Environment=AUTOSSH_POLL=30
+ExecStart=/usr/bin/autossh -M 0 -N \
+    -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes \
+    -o ConnectTimeout=15 -o BatchMode=yes -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${RELAY_KNOWN_HOSTS} \
+    -i ${RELAY_KEY} -p ${RELAY_SSH_PORT} \
+    -R ${REMOTE_LISTEN}:${LOCAL_TARGET} \
+    ${RELAY_USER}@${RELAY_HOST}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,65 @@
+# Team server (89.126.193.108), nginx variant: public https://forte.incode.kz -> 5080 PC.
+# New, separate site file; existing incode.kz config is not modified. Install (README, "Релей"):
+#   1. Certificate first (DNS forte.incode.kz -> this server, port 80 reachable). The nginx authenticator only
+#      adds a temporary challenge block and does not edit site files:
+#        sudo certbot certonly --nginx -d forte.incode.kz --deploy-hook "systemctl reload nginx"
+#      (Alternative without the nginx plugin: certonly --webroot -w <root of the server that answers port 80>.)
+#   2. sudo cp forte.incode.kz.nginx /etc/nginx/sites-available/forte.incode.kz
+#      sudo ln -s /etc/nginx/sites-available/forte.incode.kz /etc/nginx/sites-enabled/forte.incode.kz
+#      sudo nginx -t && sudo systemctl reload nginx
+#   Renewal: certbot's systemd timer; the deploy hook reloads nginx. Check: sudo certbot renew --dry-run
+#
+# Upstream: autossh reverse tunnel from the PC -> server's 127.0.0.1:18000. NetBird: <netbird-ip-of-the-pc>:8000.
+# nginx in Docker with bridge networking: 127.0.0.1 is the container itself - use network_mode: host for that
+# container, or the NetBird address.
+# IPv6: add "listen [::]:80;" / "listen [::]:443 ssl;" only if the other sites listen on [::] too (and AAAA exists).
+
+upstream forte_pc {
+    server 127.0.0.1:18000;      # NetBird variant: server <netbird-ip-of-the-pc>:8000;
+    keepalive 8;
+    # Idle upstream connections closed after 60 s, before uvicorn's 75 s (--timeout-keep-alive), so nginx
+    # never reuses a connection the app is closing (a streamed POST body could not be replayed).
+    keepalive_timeout 60s;
+}
+
+server {
+    listen 80;
+    server_name forte.incode.kz;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name forte.incode.kz;
+
+    ssl_certificate     /etc/letsencrypt/live/forte.incode.kz/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/forte.incode.kz/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:forte_ssl:5m;
+
+    # Uploads: above the app's own 200 MB cap (oversize files get the app's JSON 413), streamed, not spooled.
+    client_max_body_size 250m;
+    proxy_request_buffering off;
+    proxy_read_timeout 600s;
+    proxy_send_timeout 600s;
+    proxy_connect_timeout 10s;
+
+    access_log /var/log/nginx/forte.incode.kz.access.log;
+    error_log  /var/log/nginx/forte.incode.kz.error.log;
+
+    location / {
+        proxy_pass http://forte_pc;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

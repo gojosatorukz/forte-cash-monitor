@@ -1,0 +1,1941 @@
+/* Контроль кассовой дисциплины — UI logic. Vanilla JS, no dependencies.
+ * All untrusted text is inserted via textContent / attributes, never innerHTML. */
+(function () {
+  "use strict";
+
+  var API = "/ui-api";
+  var MAX_BYTES = 200 * 1024 * 1024;
+  var POLL_MS = 1000;
+  var HISTORY_LIMIT = 20;
+  var ALLOWED_EXT = [".mov", ".mp4"];
+
+  // ---------- DOM helpers ----------
+  function $(id) { return document.getElementById(id); }
+  var SVG_NS = "http://www.w3.org/2000/svg";
+
+  /** Create an element. attrs: {class, text, on<event>: fn, other attributes}. */
+  function el(tag, attrs, children) {
+    var node = document.createElement(tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (k) {
+        var v = attrs[k];
+        if (v === null || v === undefined || v === false) return;
+        if (k === "class") node.className = v;
+        else if (k === "text") node.textContent = String(v);
+        else if (k.indexOf("on") === 0 && typeof v === "function") node.addEventListener(k.slice(2), v);
+        else node.setAttribute(k, v === true ? "" : String(v));
+      });
+    }
+    (children || []).forEach(function (c) {
+      if (c === null || c === undefined || c === false) return;
+      node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    });
+    return node;
+  }
+
+  /** Build a small inline SVG icon from trusted, static path definitions. */
+  function icon(viewBox, shapes, cls) {
+    var svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", viewBox);
+    svg.setAttribute("aria-hidden", "true");
+    if (cls) svg.setAttribute("class", cls);
+    shapes.forEach(function (s) {
+      var n = document.createElementNS(SVG_NS, s[0]);
+      Object.keys(s[1]).forEach(function (k) { n.setAttribute(k, s[1][k]); });
+      svg.appendChild(n);
+    });
+    return svg;
+  }
+  var ICONS = {
+    play: function () { return icon("0 0 12 12", [["path", { d: "M3 1.8v8.4L10 6z", fill: "currentColor" }]]); },
+    check: function () { return icon("0 0 24 24", [["path", { d: "M5 12.5l4.5 4.5L19 7.5", fill: "none", stroke: "currentColor", "stroke-width": "2.6", "stroke-linecap": "round", "stroke-linejoin": "round" }]]); },
+    alert: function () { return icon("0 0 24 24", [["path", { d: "M12 6.5v7", stroke: "currentColor", "stroke-width": "2.6", "stroke-linecap": "round" }], ["circle", { cx: "12", cy: "17.5", r: "1.6", fill: "currentColor" }]]); },
+    external: function () { return icon("0 0 14 14", [["path", { d: "M8 2h4v4M12 2L6.5 7.5M10.5 8.5V12H2V3.5h3.5", fill: "none", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round", "stroke-linejoin": "round" }]]); },
+    shield: function () { return icon("0 0 48 48", [["path", { d: "M24 5l15 6v11c0 10-6.5 17.5-15 21-8.5-3.5-15-11-15-21V11z", fill: "none", stroke: "currentColor", "stroke-width": "2.6", "stroke-linejoin": "round" }], ["path", { d: "M16.5 24.5l5 5 10-10.5", fill: "none", stroke: "currentColor", "stroke-width": "2.6", "stroke-linecap": "round", "stroke-linejoin": "round" }]]); }
+  };
+
+  // ---------- Formatting ----------
+  function num(v) { var n = Number(v); return isFinite(n) ? n : null; }
+
+  function fmtTime(sec) {
+    var s = num(sec);
+    if (s === null || s < 0) return "—";
+    s = Math.floor(s);
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+    var mmss = String(m).padStart(2, "0") + ":" + String(r).padStart(2, "0");
+    return h ? h + ":" + mmss : mmss;
+  }
+  function fmtElapsed(sec) {
+    sec = Math.max(0, Math.floor(sec));
+    return Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0");
+  }
+  function fmtDuration(sec) {
+    var s = num(sec);
+    if (s === null) return "—";
+    if (s < 60) return s.toFixed(s < 10 ? 1 : 0).replace(".", ",") + " с";
+    return Math.floor(s / 60) + " мин " + Math.round(s % 60) + " с";
+  }
+  function fmtBytes(b) {
+    if (!isFinite(b)) return "";
+    if (b < 1024) return b + " Б";
+    if (b < 1024 * 1024) return (b / 1024).toFixed(1).replace(".", ",") + " КБ";
+    return (b / 1024 / 1024).toFixed(1).replace(".", ",") + " МБ";
+  }
+  function parseDate(iso) {
+    if (!iso) return null;
+    var d = new Date(iso);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  function fmtDate(iso) {
+    var d = parseDate(iso);
+    if (!d) return "—";
+    return d.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+  function plural(n, one, few, many) {
+    var m10 = n % 10, m100 = n % 100;
+    if (m10 === 1 && m100 !== 11) return one;
+    if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+    return many;
+  }
+  function violationsWord(n) { return plural(n, "нарушение", "нарушения", "нарушений"); }
+
+  function errorMessage(status, body) {
+    var detail = body && body.detail;
+    if (Array.isArray(detail)) {
+      detail = detail.map(function (d) { return d && (d.msg || JSON.stringify(d)); }).join("; ");
+    } else if (detail && typeof detail === "object") {
+      detail = JSON.stringify(detail);
+    }
+    if (status === 413) return "Файл слишком большой. Максимальный размер — 200 МБ." + (detail ? " (" + detail + ")" : "");
+    if (status === 400 && !detail) return "Файл пустой или имеет неподдерживаемый формат.";
+    if (status === 404) return detail || "Проверка не найдена.";
+    if (status === 0) return "Нет связи с сервером. Проверьте подключение и повторите попытку.";
+    return detail ? String(detail) : "Ошибка сервера (код " + status + ").";
+  }
+
+  // Session expired / not logged in (401 from /ui-api): back to the login page, keeping the
+  // current path and #job=... so the user lands where they were.
+  var loginRedirected = false;
+  function toLogin() {
+    if (loginRedirected) return;
+    loginRedirected = true;
+    location.replace("/login?next=" + encodeURIComponent(location.pathname + location.search + location.hash));
+  }
+
+  function fetchJSON(url) {
+    return fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" }).then(function (r) {
+      if (r.status === 401) toLogin();
+      return r.text().then(function (t) {
+        var body = null;
+        try { body = t ? JSON.parse(t) : null; } catch (e) { body = null; }
+        if (!r.ok) { var err = new Error(errorMessage(r.status, body)); err.status = r.status; throw err; }
+        return body;
+      });
+    }, function () { var err = new Error(errorMessage(0)); err.status = 0; throw err; });
+  }
+
+  // ---------- Toast ----------
+  var toastTimer = null;
+  function toast(msg) {
+    var t = $("toast");
+    t.textContent = msg;
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.hidden = true; }, 2600);
+  }
+
+  // ---------- State ----------
+  var state = {
+    file: null,          // File chosen in the picker
+    lastFile: null,      // File of the last submitted upload (for retry)
+    lastFileJobId: null, // job_id the server assigned to lastFile; retry re-uploads only for that job
+    jobId: null,         // currently displayed job
+    job: null,
+    pollToken: 0,
+    pollTimer: null,
+    elapsedTimer: null,
+    startedAt: null,     // ms epoch used for elapsed counter
+    xhr: null,
+    violations: [],
+    duration: null,
+    lightbox: { frames: [], index: 0 }
+  };
+
+  // ---------- Views ----------
+  var sections = {
+    upload: $("upload-section"),
+    progress: $("progress-section"),
+    error: $("error-section"),
+    result: $("result-section")
+  };
+  function show(which) {
+    sections.upload.hidden = which !== "upload";
+    sections.progress.hidden = which !== "progress";
+    sections.error.hidden = which !== "error";
+    sections.result.hidden = which !== "result";
+    document.body.setAttribute("data-view", which);
+    var crumb = $("crumb-current");
+    if (crumb) crumb.textContent = CRUMBS[which] || "Проверки";
+  }
+  var CRUMBS = { upload: "Новая проверка", progress: "Анализ записи", error: "Ошибка проверки", result: "Результат проверки" };
+
+  // ---------- File selection ----------
+  var fileInput = $("file-input"), dropzone = $("dropzone");
+
+  function setUploadError(msg) {
+    var e = $("upload-error");
+    e.textContent = msg || "";
+    e.hidden = !msg;
+  }
+  function chooseFile(f) {
+    setUploadError("");
+    if (!f) { state.file = null; renderFile(); return; }
+    var name = (f.name || "").toLowerCase();
+    var okExt = ALLOWED_EXT.some(function (x) { return name.slice(-x.length) === x; });
+    if (!okExt && !/^video\//.test(f.type || "")) {
+      setUploadError("Неподдерживаемый формат файла. Выберите видео .mov или .mp4.");
+      state.file = null; renderFile(); return;
+    }
+    if (f.size === 0) { setUploadError("Файл пустой."); state.file = null; renderFile(); return; }
+    if (f.size > MAX_BYTES) {
+      setUploadError("Файл слишком большой (" + fmtBytes(f.size) + "). Максимальный размер — 200 МБ.");
+      state.file = null; renderFile(); return;
+    }
+    state.file = f;
+    renderFile();
+  }
+  function renderFile() {
+    var f = state.file;
+    $("file-row").hidden = !f;
+    dropzone.hidden = !!f;
+    $("submit-btn").disabled = !f;
+    if (f) {
+      $("file-name").textContent = f.name;
+      $("file-name").title = f.name;
+      $("file-size").textContent = fmtBytes(f.size) + (f.type ? " · " + f.type : "");
+    }
+  }
+  fileInput.addEventListener("change", function () { chooseFile(fileInput.files && fileInput.files[0]); });
+  $("file-clear").addEventListener("click", function () { fileInput.value = ""; chooseFile(null); fileInput.focus(); });
+  ["dragenter", "dragover"].forEach(function (ev) {
+    dropzone.addEventListener(ev, function (e) { e.preventDefault(); dropzone.classList.add("is-over"); });
+  });
+  ["dragleave", "dragend", "drop"].forEach(function (ev) {
+    dropzone.addEventListener(ev, function (e) { e.preventDefault(); dropzone.classList.remove("is-over"); });
+  });
+  dropzone.addEventListener("drop", function (e) {
+    var files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length) chooseFile(files[0]);
+  });
+  // Prevent the browser from navigating away when a file is dropped outside the zone.
+  window.addEventListener("dragover", function (e) { e.preventDefault(); });
+  window.addEventListener("drop", function (e) {
+    e.preventDefault();
+    if (!sections.upload.hidden && e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+      chooseFile(e.dataTransfer.files[0]);
+    }
+  });
+
+  // ---------- Progress UI ----------
+  function setSteps(active) {
+    var order = ["upload", "analyze", "report"];
+    var idx = order.indexOf(active);
+    order.forEach(function (s, i) {
+      var n = $("step-" + s);
+      n.classList.toggle("is-active", i === idx);
+      n.classList.toggle("is-done", i < idx);
+    });
+  }
+  function setProgress(title, stage, frac, indeterminate) {
+    $("progress-title").textContent = title;
+    $("progress-stage").textContent = stage || "";
+    var pct = Math.max(0, Math.min(100, Math.round((frac || 0) * 100)));
+    $("progress-pct").textContent = indeterminate ? "…" : pct + "%";
+    $("progress-fill").style.width = pct + "%";
+    var bar = $("progress-bar");
+    bar.setAttribute("aria-valuenow", String(pct));
+    bar.classList.toggle("is-indeterminate", !!indeterminate);
+  }
+  function startElapsed(fromMs) {
+    state.startedAt = fromMs || Date.now();
+    clearInterval(state.elapsedTimer);
+    var tick = function () { $("progress-elapsed").textContent = fmtElapsed((Date.now() - state.startedAt) / 1000); };
+    tick();
+    state.elapsedTimer = setInterval(tick, 500);
+  }
+  function stopElapsed() { clearInterval(state.elapsedTimer); state.elapsedTimer = null; }
+
+  function stopPolling() {
+    state.pollToken++;
+    clearTimeout(state.pollTimer);
+    state.pollTimer = null;
+  }
+
+  // ---------- Upload ----------
+  $("upload-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    if (state.file) upload(state.file);
+  });
+
+  function upload(file) {
+    stopPolling();
+    if (state.xhr) { try { state.xhr.abort(); } catch (err) { /* ignore */ } }
+    state.lastFile = file;
+    state.lastFileJobId = null; // set once the server assigns a job_id to this file
+    setUploadError("");
+    show("progress");
+    setSteps("upload");
+    setProgress("Загрузка видео…", file.name + " · " + fmtBytes(file.size), 0, false);
+    startElapsed();
+
+    var fd = new FormData();
+    fd.append("file", file, file.name);
+    var xhr = new XMLHttpRequest();
+    state.xhr = xhr;
+    xhr.open("POST", API + "/analyze");
+    xhr.setRequestHeader("Accept", "application/json");
+    xhr.upload.addEventListener("progress", function (ev) {
+      if (ev.lengthComputable) {
+        setProgress("Загрузка видео…", fmtBytes(ev.loaded) + " из " + fmtBytes(ev.total), ev.loaded / ev.total, false);
+        if (ev.loaded >= ev.total) setProgress("Видео загружено", "Регистрация задачи…", 1, true);
+      }
+    });
+    xhr.addEventListener("load", function () {
+      if (xhr.status === 401) toLogin();
+      state.xhr = null;
+      var body = null;
+      try { body = JSON.parse(xhr.responseText); } catch (err) { body = null; }
+      if (xhr.status >= 200 && xhr.status < 300 && body && body.job_id) {
+        fileInput.value = "";
+        state.file = null;
+        renderFile();
+        var id = String(body.job_id);
+        state.lastFileJobId = id;
+        if (location.hash !== "#job=" + encodeURIComponent(id)) {
+          location.hash = "job=" + encodeURIComponent(id); // triggers hashchange → openJob
+        } else {
+          openJob(id);
+        }
+        refreshHistory();
+      } else {
+        uploadFailed(errorMessage(xhr.status, body));
+      }
+    });
+    xhr.addEventListener("error", function () { state.xhr = null; uploadFailed(errorMessage(0)); });
+    xhr.addEventListener("abort", function () { state.xhr = null; });
+    xhr.send(fd);
+  }
+
+  function uploadFailed(msg) {
+    stopElapsed();
+    show("upload");
+    renderFile();
+    setUploadError(msg);
+  }
+
+  // ---------- Job loading / polling ----------
+  function openJob(id) {
+    stopPolling();
+    if (state.xhr) { try { state.xhr.abort(); } catch (err) { /* ignore */ } state.xhr = null; }
+    resetPlayer();
+    state.jobId = id;
+    state.job = null;
+    markCurrentHistory();
+    var token = state.pollToken;
+    show("progress");
+    setSteps("analyze");
+    setProgress("Загрузка результата…", "", 0, true);
+    startElapsed();
+    poll(id, token, true);
+  }
+
+  function poll(id, token, first) {
+    fetchJSON(API + "/jobs/" + encodeURIComponent(id)).then(function (job) {
+      if (token !== state.pollToken) return;
+      if (!job || typeof job !== "object" || (job.status !== "done" && job.status !== "failed")) {
+        // "processing", or an unexpected body (e.g. a non-JSON proxy page answered 200):
+        // never render that as a result, keep polling.
+        job = (job && typeof job === "object") ? job : {};
+        state.job = job;
+        if (first && job.status === "processing") {
+          var created = parseDate(job.created_at);
+          if (created && Date.now() - created.getTime() < 6 * 3600 * 1000) startElapsed(created.getTime());
+        }
+        if (job.status === "processing") {
+          renderProcessing(job);
+          state.pollTimer = setTimeout(function () { poll(id, token, false); }, POLL_MS);
+        } else {
+          $("progress-stage").textContent = "Неожиданный ответ сервера, повторяем запрос…";
+          state.pollTimer = setTimeout(function () { poll(id, token, false); }, POLL_MS * 2);
+        }
+        return;
+      }
+      state.job = job;
+      if (job.status === "failed") {
+        stopElapsed();
+        renderFailed(job.error || "Неизвестная ошибка анализа.");
+        if (!first) refreshHistory();
+      } else {
+        stopElapsed();
+        renderResult(job);
+        if (!first) refreshHistory();
+      }
+    }).catch(function (err) {
+      if (token !== state.pollToken) return;
+      if (err.status === 404) {
+        stopElapsed();
+        renderFailed("Проверка с идентификатором «" + id + "» не найдена. Возможно, ссылка устарела.", true);
+        return;
+      }
+      if (err.status === 0 || err.status >= 500) {
+        // transient: keep polling, show the issue in the stage line
+        $("progress-stage").textContent = "Нет ответа от сервера, повторяем запрос…";
+        state.pollTimer = setTimeout(function () { poll(id, token, false); }, POLL_MS * 2);
+        return;
+      }
+      stopElapsed();
+      renderFailed(err.message);
+    });
+  }
+
+  function renderProcessing(job) {
+    show("progress");
+    setSteps("analyze");
+    var p = num(job.progress);
+    var stage = job.stage || (p ? "Обработка…" : "Задача в очереди");
+    var title = "Анализ видеозаписи" + (job.filename ? " · " + job.filename : "");
+    setProgress(title, stage, p || 0, p === null);
+  }
+
+  function renderFailed(msg, notFound) {
+    show("error");
+    $("error-text").textContent = msg;
+    $("retry-btn").hidden = !!notFound;
+    $("retry-btn").textContent = canReupload() ? "Повторить загрузку" : "Повторить";
+  }
+
+  $("retry-btn").addEventListener("click", function () {
+    if (canReupload()) { upload(state.lastFile); return; }
+    // No local file (e.g. opened from history): re-fetch the job, else go to upload form.
+    if (state.job && state.job.status !== "failed" && state.jobId) { openJob(state.jobId); return; }
+    goHome();
+    setUploadError("Выберите видеофайл повторно, чтобы запустить новую проверку.");
+  });
+  $("new-check-btn-err").addEventListener("click", goHome);
+  $("brand-link").addEventListener("click", function (e) { e.preventDefault(); goHome(); });
+  document.querySelectorAll(".js-home:not(#brand-link)").forEach(function (a) {
+    a.addEventListener("click", function (e) { e.preventDefault(); goHome(); });
+  });
+
+  function goHome() {
+    stopPolling();
+    if (state.xhr) { try { state.xhr.abort(); } catch (err) { /* ignore */ } state.xhr = null; }
+    stopElapsed();
+    resetPlayer();
+    state.jobId = null;
+    state.job = null;
+    markCurrentHistory();
+    if (location.hash) history.pushState(null, "", location.pathname + location.search);
+    lastRoutedHash = location.hash;
+    show("upload");
+    renderFile();
+    window.scrollTo({ top: 0 });
+  }
+
+  $("copy-link-btn").addEventListener("click", function () {
+    var url = location.href;
+    var done = function () { toast("Ссылка на результат скопирована"); };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(url).then(done, function () { fallbackCopy(url) ? done() : toast(url); });
+    } else {
+      fallbackCopy(url) ? done() : toast(url);
+    }
+  });
+  function fallbackCopy(text) {
+    var ta = el("textarea", { readonly: true, style: "position:fixed;left:-9999px;top:0" });
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  }
+
+  // ---------- Result rendering ----------
+  var video = $("video");
+
+  function renderResult(job) {
+    show("result");
+    // `_n`: the server's 1-based violation number (clip_url / review key), kept through the sort.
+    var vs = (Array.isArray(job.violations) ? job.violations : []).map(function (v, i) {
+      v = (v && typeof v === "object") ? v : {};
+      v._n = i + 1;
+      return v;
+    });
+    vs.sort(byTime);
+    state.violations = vs;
+    var n = vs.length;
+    var bad = job.verdict === "violation" || (job.verdict == null && n > 0);
+
+    // Verdict banner
+    var verdict = $("verdict");
+    verdict.className = "verdict " + (bad ? "verdict--bad" : "verdict--ok");
+    var vi = $("verdict-icon");
+    vi.textContent = "";
+    vi.appendChild(bad ? ICONS.alert() : ICONS.check());
+    $("verdict-title").textContent = bad ? "Обнаружены нарушения: " + n : "Нарушений не обнаружено";
+    var meta = $("verdict-meta");
+    meta.textContent = "";
+    if (job.filename) meta.appendChild(el("span", { text: "Файл: " + job.filename }));
+    if (job.finished_at || job.created_at) meta.appendChild(el("span", { text: "Проверено: " + fmtDate(job.finished_at || job.created_at) }));
+    var c = parseDate(job.created_at), f = parseDate(job.finished_at);
+    if (c && f && f >= c) meta.appendChild(el("span", { text: "Время анализа: " + fmtElapsed((f - c) / 1000) }));
+    if (job.job_id) meta.appendChild(el("span", { text: "ID: " + job.job_id }));
+    $("partial-note").hidden = !job.partial;
+    renderWarnings(job.warnings);
+
+    // Video
+    var src = API + "/jobs/" + encodeURIComponent(job.job_id || state.jobId) + "/video";
+    if (video.getAttribute("src") !== src) {
+      resetPlayer();
+      removeVideoError();
+      video.setAttribute("src", src);
+      video.load();
+    }
+    var vm = job.video_meta || {};
+    state.duration = num(vm.duration_sec);
+    var w = num(vm.width), h = num(vm.height);
+    state.aspect = w && h ? w / h : null;  // number (w/h); clips use it until their own metadata loads
+    if (state.aspect) video.style.aspectRatio = w + " / " + h;
+    else video.style.removeProperty("aspect-ratio");
+    setLandscape(state.aspect !== null && state.aspect > 1.05);
+    renderVideoMeta(vm);
+    renderTimeline();
+
+    // Violations
+    $("violations-title").textContent = n ? "Выявленные нарушения (" + n + ")" : "Выявленные нарушения";
+    var list = $("violations-list");
+    if (clipObserver) clipObserver.disconnect();  // the old cards' clips are being replaced
+    list.textContent = "";
+    if (!n) {
+      list.appendChild(el("div", { class: "empty-ok" }, [
+        ICONS.shield(),
+        el("strong", { text: "Нарушений регламента не выявлено" }),
+        el("span", { text: job.partial
+          ? "Анализ был прерван по лимиту времени: часть записи могла остаться непроверенной."
+          : "Видеозапись проверена полностью: событий, подпадающих под типы нарушений из нормативной базы, не найдено." }),
+        el("button", { type: "button", class: "btn btn--secondary btn--sm", text: "Какие нарушения проверяются",
+          onclick: function () { $("rules-open").click(); } })
+      ]));
+    } else {
+      vs.forEach(function (v, i) { list.appendChild(renderViolation(v, i)); });
+    }
+    renderProcedure(job);
+    renderReview(job, vs);
+  }
+
+  // ---------- Operation steps (job.meta.procedure) ----------
+  // Status -> [icon, text label, css modifier]. The icon is decorative; the label is always present.
+  var PROC_ST = {
+    ok: ["✓", "Соблюдено", "ok"],
+    violation: ["✕", "Нарушение", "bad"],
+    risk: ["⚠", "Риск", "risk"],
+    not_checked: ["—", "Не проверялось", "na"],
+    manual: ["✎", "Проверяется вручную", "manual"]
+  };
+  /** Client-side re-check of meta.procedure (the worker validates it, but a record may carry it raw). */
+  function procedureOf(job) {
+    var p = job && job.meta && job.meta.procedure;
+    if (!p || typeof p !== "object" || !Array.isArray(p.steps)) return null;
+    var steps = [];
+    p.steps.slice(0, 30).forEach(function (s) {
+      if (!s || typeof s !== "object" || typeof s.title_ru !== "string" || !s.title_ru.trim()) return;
+      var t = num(s.t_sec);
+      steps.push({
+        title: s.title_ru.trim(),
+        status: PROC_ST.hasOwnProperty(s.status) ? s.status : "not_checked",
+        t: s.t_sec !== null && s.t_sec !== undefined && t !== null && t >= 0 ? t : null,
+        typeIds: Array.isArray(s.type_ids) ? s.type_ids.filter(function (x) { return typeof x === "string" && x; }).slice(0, 10) : [],
+        note: typeof s.note_ru === "string" ? s.note_ru : "",
+        // Only a norm the worker derived from the rules KB / checklist is shown; a raw detector
+        // `rule` (free text, unverified) never reaches the screen.
+        rule: (s.rule_source === "rules" || s.rule_source === "checklist") && typeof s.rule === "string" ? s.rule : "",
+        ruleUrl: (s.rule_source === "rules" || s.rule_source === "checklist") ? safeUrl(s.rule_url) : null,
+        checklistIds: Array.isArray(s.checklist_ids) ? s.checklist_ids.filter(function (x) { return typeof x === "string"; }) : []
+      });
+    });
+    if (!steps.length) return null;
+    var conf = num(p.confidence);
+    return {
+      title: typeof p.title_ru === "string" ? p.title_ru.trim() : "",  // never derived from `type`
+      confidence: conf !== null && conf >= 0 && conf <= 1 ? conf : null,
+      basis: typeof p.basis_ru === "string" ? p.basis_ru.trim() : "",
+      steps: steps
+    };
+  }
+
+  function flashCard(card) {
+    card.classList.remove("is-flash");
+    void card.offsetWidth;  // restart the animation
+    card.classList.add("is-flash");
+  }
+  /** Scroll to the reviewer checklist; focus the first of `ids` (checklist item ids) if present. */
+  function focusChecklist(ids) {
+    var box = document.querySelector("#review-panel:not([hidden]) .rv-checklist:not([hidden])");
+    if (!box) { toast("Чек-лист проверяющего доступен в панели проверки после загрузки результата"); return; }
+    var target = null;
+    (ids || []).some(function (id) {
+      target = Array.prototype.find.call(box.querySelectorAll(".cl-item"), function (li) { return li.getAttribute("data-id") === id; }) || null;
+      return !!target;
+    });
+    var grp = target && target.closest("details.cl-group");
+    if (grp) grp.open = true;
+    var flash = target || box;
+    flash.scrollIntoView({ behavior: "smooth", block: "center" });
+    flash.classList.remove("is-flash");
+    void flash.offsetWidth;
+    flash.classList.add("is-flash");
+    var first = flash.querySelector("button");
+    if (first) { try { first.focus({ preventScroll: true }); } catch (e) { first.focus(); } }
+  }
+
+  function renderProcedure(job) {
+    var panel = $("procedure-panel");
+    panel.textContent = "";
+    var pr = procedureOf(job);
+    if (!pr) { panel.hidden = true; return; }
+    panel.hidden = false;
+    var counts = {};
+    pr.steps.forEach(function (s) { counts[s.status] = (counts[s.status] || 0) + 1; });
+
+    var head = el("div", { class: "proc__head" }, [
+      el("h3", { class: "proc__title", id: "proc-title" }, [
+        el("span", { class: "proc__eyebrow", text: "Операция" }),
+        el("span", { class: "proc__name" + (pr.title ? "" : " proc__name--unknown"), text: pr.title || "не определена" })
+      ]),
+      pr.confidence !== null ? el("span", { class: "chip proc__conf", title: "Уверенность определения операции",
+        text: "Уверенность " + Math.round(pr.confidence * 100) + "%" }) : null
+    ]);
+    panel.appendChild(head);
+    if (pr.basis) panel.appendChild(el("p", { class: "proc__basis", text: "Основание: " + pr.basis }));
+
+    // One-line summary: all-ok is the "everything checked" story; otherwise counts per status.
+    var allOk = counts.ok === pr.steps.length;
+    var summary = allOk
+      ? [ICONS.check(), "Все этапы операции соблюдены (" + pr.steps.length + ")"]
+      : ["violation", "risk", "manual", "not_checked", "ok"].filter(function (k) { return counts[k]; })
+          .map(function (k) { return el("span", { class: "proc__count pstep--" + PROC_ST[k][2], text: PROC_ST[k][1] + ": " + counts[k] }); });
+    panel.appendChild(el("p", { class: "proc__summary" + (allOk ? " proc__summary--ok" : "") }, summary));
+
+    var list = el("ol", { class: "proc__steps", "aria-label": "Этапы операции" });
+    pr.steps.forEach(function (s, i) {
+      var st = PROC_ST[s.status];
+      var actions = [];
+      if (s.t !== null) {
+        actions.push(el("button", { type: "button", class: "timecode timecode--sm",
+          "aria-label": "Этап «" + s.title + "»: перейти к моменту " + fmtTime(s.t),
+          onclick: function () { seekTo(s.t, true); } }, [ICONS.play(), fmtTime(s.t)]));
+      }
+      s.typeIds.forEach(function (tid) {
+        var idx = -1;
+        state.violations.some(function (v, vi) { if (typeIdOf(v) === tid) { idx = vi; return true; } return false; });
+        if (idx < 0) { actions.push(el("span", { class: "type-id proc__tid", title: "Тип нарушения " + tid, text: tid })); return; }
+        actions.push(el("button", { type: "button", class: "type-id proc__tid proc__tid--link",
+          "aria-label": "Показать нарушение " + tid,
+          text: tid, onclick: function () {
+            var card = $("violation-" + idx);
+            if (!card) return;
+            highlightViolation(idx, false);
+            card.scrollIntoView({ behavior: "smooth", block: "start" });
+            flashCard(card);
+          } }));
+      });
+      if (s.status === "manual") {
+        actions.push(el("button", { type: "button", class: "proc__manual", text: "Отметить в чек-листе",
+          onclick: function () { focusChecklist(s.checklistIds); } }));
+      }
+      var li = el("li", { class: "pstep pstep--" + st[2] }, [
+        el("span", { class: "pstep__icon", "aria-hidden": "true", text: st[0] }),
+        el("div", { class: "pstep__body" }, [
+          el("div", { class: "pstep__row" }, [
+            el("span", { class: "pstep__title", text: (i + 1) + ". " + s.title }),
+            el("span", { class: "pstep__status", text: st[1] })
+          ]),
+          s.note ? el("p", { class: "pstep__note", text: s.note }) : null,
+          s.rule ? el("p", { class: "pstep__rule" }, ["Норма: ",
+            s.ruleUrl ? el("a", { href: s.ruleUrl, target: "_blank", rel: "noopener noreferrer", text: s.rule }) : s.rule]) : null,
+          actions.length ? el("div", { class: "pstep__actions" }, actions) : null
+        ])
+      ]);
+      s.li = li;
+      list.appendChild(li);
+    });
+    panel.appendChild(list);
+    liveSetup(pr);
+  }
+
+  // ---------- Live replay of the steps while the video plays (LIVE_REPLAY, app/static/live.js) ----------
+  // Stage strip under the timeline, current-step highlight in «Операция», «Этап N/M» chip and a
+  // violation toast on the player. Crossing effects fire only during normal forward play.
+  var LIVE_WIN_SEC = 1.5;   // half-width of a step's segment on the strip
+  var LIVE_TOAST_MS = 2500;
+  var live = { steps: [], cur: null, prevT: null, toastTimer: null };
+  function liveEnabled() {
+    return document.documentElement.getAttribute("data-live") !== "0" && !!window.LiveReplay;
+  }
+  /** Steps with a finite t_sec that are not manual, sorted by time; n = 1-based position among them. */
+  function liveSetup(pr) {
+    liveClear();
+    if (!pr || !liveEnabled()) { renderStageStrip(); return; }
+    var timed = pr.steps.filter(function (s) { return s.t !== null && s.status !== "manual"; })
+      .map(function (s, i) { return { src: s, t_sec: s.t, order: i }; });
+    timed.sort(function (a, b) { return a.t_sec - b.t_sec || a.order - b.order; });
+    timed.forEach(function (x, i) { x.n = i + 1; x.title = x.src.title; x.status = x.src.status; x.li = x.src.li; });
+    live.steps = timed;
+    live.prevT = num(video.currentTime);
+    renderStageStrip();
+    liveTick(true);
+  }
+  function liveClear() {
+    live.steps.forEach(function (x) { if (x.li) x.li.classList.remove("is-current"); });
+    live.steps = []; live.cur = null; live.prevT = null;
+    clearTimeout(live.toastTimer);
+    var t = $("live-toast"); t.classList.remove("is-on"); t.textContent = "";
+    $("live-chip").hidden = true;
+  }
+  /** Violation interval [start, end] for a step whose type_ids match a violation (the one nearest t_sec). */
+  function liveViolationSpan(x) {
+    var best = null, bestD = Infinity;
+    state.violations.forEach(function (v) {
+      if (x.src.typeIds.indexOf(typeIdOf(v)) < 0) return;
+      var a = num(v.start_sec), b = num(v.end_sec);
+      if (a === null || b === null || !(b > a)) return;
+      var dist = x.t_sec < a ? a - x.t_sec : x.t_sec > b ? x.t_sec - b : 0;
+      if (dist < bestD) { bestD = dist; best = [a, b]; }
+    });
+    return best;
+  }
+  function renderStageStrip() {
+    var strip = $("stage-strip");
+    strip.textContent = "";
+    var d = effectiveDuration();
+    if (!live.steps.length || !d) { strip.hidden = true; return; }
+    strip.hidden = false;
+    live.steps.forEach(function (x, i) {
+      var span = liveViolationSpan(x), lo, hi;
+      if (span) { lo = span[0]; hi = span[1]; }
+      else {
+        var prev = live.steps[i - 1], next = live.steps[i + 1];
+        lo = x.t_sec - LIVE_WIN_SEC; hi = x.t_sec + LIVE_WIN_SEC;
+        if (prev) lo = Math.max(lo, (prev.t_sec + x.t_sec) / 2);
+        if (next) hi = Math.min(hi, (x.t_sec + next.t_sec) / 2);
+      }
+      lo = Math.max(0, Math.min(d, lo)); hi = Math.max(lo, Math.min(d, hi));
+      var st = PROC_ST[x.status];
+      var label = "Этап " + x.n + ": " + x.title + " — " + st[1];
+      // A violation interval sits under the ±window segments (CSS z-index) so neighbours stay clickable;
+      // DOM (= tab) order stays chronological.
+      x.seg = el("button", {
+        type: "button", class: "stage-seg stage-seg--" + st[2] + (span ? " stage-seg--span" : "") + (live.cur === x ? " is-current" : ""),
+        title: label + " · " + fmtTime(x.t_sec), "aria-label": label,
+        style: "left:" + (lo / d * 100) + "%;width:" + ((hi - lo) / d * 100) + "%",
+        onclick: function () { seekTo(x.t_sec, true, true); }
+      });
+      strip.appendChild(x.seg);
+    });
+  }
+  function restartAnim(node, cls) {
+    if (!node) return;
+    node.classList.remove(cls);
+    void node.offsetWidth;  // restart the animation
+    node.classList.add(cls);
+  }
+  function liveToast(msg) {
+    var t = $("live-toast");
+    clearTimeout(live.toastTimer);
+    t.textContent = msg;
+    t.classList.add("is-on");
+    live.toastTimer = setTimeout(function () { t.classList.remove("is-on"); t.textContent = ""; }, LIVE_TOAST_MS);
+  }
+  function liveLand(x) {
+    var cls = { ok: "is-land-ok", violation: "is-land-bad", risk: "is-land-risk" }[x.status];
+    if (cls) { restartAnim(x.li, cls); restartAnim(x.seg, cls); }
+    if (x.status === "violation") liveToast("Нарушение: " + x.title);
+  }
+  /** Highlight + chip from currentTime; landing effects for steps crossed since the last sample. */
+  function liveTick(noLanding) {
+    if (!live.steps.length) return;
+    var t = num(video.currentTime) || 0;
+    var cur = window.LiveReplay.stepAtTime(live.steps, t);
+    if (cur !== live.cur) {
+      live.steps.forEach(function (x) {
+        if (x.li) x.li.classList.toggle("is-current", x === cur);
+        if (x.seg) x.seg.classList.toggle("is-current", x === cur);
+      });
+      live.cur = cur;
+      var chip = $("live-chip");
+      if (cur) {
+        chip.textContent = "Этап " + cur.n + "/" + live.steps.length + ": " + cur.title;
+        chip.className = "live-chip live-chip--" + PROC_ST[cur.status][2];
+        chip.hidden = false;
+      } else chip.hidden = true;
+    }
+    if (!noLanding) window.LiveReplay.crossedSteps(live.steps, live.prevT, t).forEach(liveLand);
+    live.prevT = t;
+  }
+  // The timeupdate of a seek is queued after `seeking` is already false (but before `seeked`),
+  // so a seek is tracked from its `seeking` event: no landing until `seeked`. Paused-state
+  // timeupdates (the one fired by pause()) still count — they report real play progress.
+  var liveSeeking = false;
+  video.addEventListener("seeking", function () { liveSeeking = true; });
+  video.addEventListener("timeupdate", function () { liveTick(liveSeeking || video.seeking); });
+  video.addEventListener("seeked", function () { liveSeeking = false; liveTick(true); });
+  video.addEventListener("emptied", function () { liveSeeking = false; });
+  video.addEventListener("play", function () { live.prevT = num(video.currentTime); });
+
+  // Analyzer / service notes (e.g. «анализ выполнен без VLM-проверок…»), shown above the violations.
+  function renderWarnings(ws) {
+    var items = (Array.isArray(ws) ? ws : []).filter(function (w) { return w !== null && w !== undefined && String(w).trim(); });
+    var ul = $("warnings-list");
+    ul.textContent = "";
+    items.forEach(function (w) { ul.appendChild(el("li", { text: String(w) })); });
+    $("warnings-note").hidden = items.length === 0;
+  }
+
+  function renderVideoMeta(vm) {
+    var dl = $("video-meta");
+    dl.textContent = "";
+    var rows = [];
+    if (num(vm.duration_sec) !== null) rows.push(["Длительность", fmtDuration(vm.duration_sec)]);
+    if (num(vm.width) && num(vm.height)) rows.push(["Разрешение", vm.width + " × " + vm.height]);
+    if (num(vm.fps)) rows.push(["Частота кадров", (Math.round(vm.fps * 100) / 100 + "").replace(".", ",") + " к/с"]);
+    if (vm.codec) rows.push(["Кодек", String(vm.codec)]);
+    rows.forEach(function (r) {
+      dl.appendChild(el("dt", { text: r[0] }));
+      dl.appendChild(el("dd", { text: r[1] }));
+    });
+    dl.hidden = rows.length === 0;
+  }
+
+  // Two-axis assessment: did it happen (fact) / how firmly the cited norm covers it (legal strength).
+  // num(null) is 0, so a missing score must be checked explicitly.
+  function score(v) { return v === null || v === undefined || v === "" ? null : num(v); }
+  function unit(c) { if (c > 1) c = c / 100; return Math.max(0, Math.min(1, c)); }
+  function scoreItem(label, hint, value, gauge, muted) {
+    return el("div", { class: "score", title: hint }, [
+      el("div", { class: "score__label", text: label }),
+      el("div", { class: "score__value" + (muted ? " score__value--muted" : "") }, [gauge, value])
+    ]);
+  }
+  function percentScore(conf, label, hint) {
+    var c = score(conf);
+    if (c === null) return null;
+    c = unit(c);
+    var meter = el("span", { class: "meter" + (c < 0.5 ? " meter--low" : ""), "aria-hidden": "true" }, [
+      el("span", { class: "meter__fill", style: "width:" + Math.round(c * 100) + "%" })
+    ]);
+    return scoreItem(label, hint, Math.round(c * 100) + "%", meter);
+  }
+  var STRENGTH_RANK = { low: 1, medium: 2, high: 3 };
+  var STRENGTH_HINT = "Насколько однозначно указанная норма относится к такому событию";
+  function strengthScore(s) {
+    var key = String(s || "").toLowerCase();
+    if (!STRENGTH_RANK[key]) return null;
+    var segs = el("span", { class: "segs segs--" + key, "aria-hidden": "true" }, [1, 2, 3].map(function (k) {
+      return el("i", { class: k <= STRENGTH_RANK[key] ? "on" : null });
+    }));
+    return scoreItem("Сила правовой нормы", STRENGTH_HINT, LEGAL_CONF_RU[key], segs);
+  }
+  function renderScores(v, hasRule) {
+    var items = [];
+    if (score(v.fact_conf) !== null || score(v.legal_conf) !== null || v.legal_strength) {
+      items.push(percentScore(v.fact_conf, "Уверенность в факте", "Насколько уверенно система зафиксировала само событие"));
+      // legal_conf is an ordinal encoding of the strength (0.9/0.7/0.4), not a probability:
+      // show the level when it is known, the percentage only as a fallback.
+      items.push(strengthScore(v.legal_strength) ||
+        percentScore(v.legal_conf, "Уверенность в норме", "Насколько уверенно событие подпадает под указанную норму") ||
+        (hasRule ? null : scoreItem("Сила правовой нормы", "Для этого типа событий норма не приводится", "не определена", null, true)));
+    } else {
+      items.push(percentScore(v.confidence, "Уверенность модели", "Уверенность модели в обнаруженном событии"));
+    }
+    items = items.filter(Boolean);
+    if (!items.length) return null;
+    var box = el("div", { class: "scores" }, items);
+    if (items.length === 1) box.style.gridTemplateColumns = "minmax(0, 1fr)";
+    return box;
+  }
+
+  // Display order (same key as act.js): interval start, then timecode, then the server number.
+  // Cards and the act show the server number `_n`, so references agree whatever the order.
+  function byTime(a, b) {
+    return ((startOf(a) || 0) - (startOf(b) || 0)) ||
+      ((num(a.timecode_sec) || 0) - (num(b.timecode_sec) || 0)) || (a._n - b._n);
+  }
+
+  // Start of a violation interval: start_sec if given, else the timecode.
+  function startOf(v) {
+    var s = score(v && v.start_sec);
+    return s !== null ? s : num(v && v.timecode_sec);
+  }
+
+  // Rule id: `type_id` (current schema); old results carried the id in `type` next to `title_ru`.
+  function typeIdOf(v) {
+    if (v.type_id) return String(v.type_id);
+    if (v.type && v.title_ru && v.type !== v.title_ru) return String(v.type);
+    return "";
+  }
+
+  function renderViolation(v, i) {
+    var t = startOf(v);
+    var end = num(v.end_sec);
+    var hasRange = end !== null && t !== null && end > t;
+    var title = v.title_ru || v.type || "Нарушение";
+    var typeId = typeIdOf(v);
+    var chips = [];
+    if (t !== null) {
+      chips.push(el("button", {
+        type: "button", class: "timecode",
+        "aria-label": "Перейти к моменту " + fmtTime(t) + (hasRange ? "–" + fmtTime(end) : ""),
+        onclick: function () { seekTo(t, true); }
+      }, [ICONS.play(), fmtTime(t) + (hasRange ? " – " + fmtTime(end) : "")]));
+    }
+    if (hasRange) chips.push(el("span", { class: "chip", text: "Длительность " + fmtDuration(end - t) }));
+
+    var card = el("article", { class: "vcard", id: "violation-" + i, "aria-labelledby": "vtitle-" + i }, [
+      el("div", { class: "vcard__top" }, [
+        el("span", { class: "vcard__num", "aria-hidden": "true", title: "Срабатывание № " + (v._n || i + 1), text: String(v._n || i + 1) }),
+        el("div", { class: "vcard__heading" }, [
+          el("h4", { class: "vcard__title", id: "vtitle-" + i }, [
+            typeId ? el("span", { class: "type-id", title: "Код типа нарушения", text: typeId }) : null,
+            title
+          ]),
+          el("div", { class: "vcard__chips" }, chips)
+        ])
+      ])
+    ]);
+    var rules = [];
+    if (Array.isArray(v.rules) && v.rules.length) rules = v.rules.filter(Boolean);
+    else if (v.rule) rules = [v.rule];
+    var scores = renderScores(v, rules.length > 0);
+    if (scores) card.appendChild(scores);
+    var descText = v.description_text || v.description;
+    if (descText) card.appendChild(el("p", { class: "vcard__desc", text: descText }));
+
+    var frames = Array.isArray(v.evidence_frames) ? v.evidence_frames.filter(function (f) { return f && f.image_base64; }) : [];
+    var clip = clipUrl(v.clip_url);
+    var media = el("div", { class: "vmedia" });
+    if (clip) media.appendChild(renderClip(clip, frames[0], title, t));
+    if (frames.length) {
+      var strip = el("div", { class: "frames", role: "list", "aria-labelledby": "vframes-" + i });
+      frames.forEach(function (fr, fi) {
+        var ts = num(fr.timestamp_sec);
+        var marked = fr.annotated === true;
+        var img = el("img", { src: "data:image/jpeg;base64," + fr.image_base64, alt: "Кадр " + fmtTime(ts) + (marked ? " с разметкой" : ""), loading: "lazy" });
+        strip.appendChild(el("button", {
+          type: "button", class: "frame", role: "listitem",
+          "aria-label": "Открыть кадр " + (fi + 1) + " (" + fmtTime(ts) + ")" + (marked ? ", с разметкой" : ""),
+          onclick: function () { openLightbox(frames, fi, title); }
+        }, [img, marked ? el("span", { class: "frame__badge", text: "Разметка" }) : null,
+          el("span", { class: "frame__ts", text: fmtTime(ts) })]));
+      });
+      media.appendChild(el("div", { class: "vmedia__frames" }, [
+        el("div", { class: "vmedia__label", id: "vframes-" + i, text: "Кадры-доказательства" }), strip
+      ]));
+    }
+    if (media.childNodes.length) card.appendChild(media);
+
+    rules.forEach(function (r, ri) { card.appendChild(renderRule(r, ri === 0 ? "Нарушенная норма" : "Также относится")); });
+    if (!rules.length) {
+      // No citation in the rules base for this type: say so instead of inventing one.
+      card.appendChild(el("div", { class: "rule rule--none", role: "note" }, [
+        el("div", { class: "rule__label", text: "Нарушенная норма" }),
+        el("div", { class: "rule__none", text: "Норма не определена — требуется проверка специалистом" })
+      ]));
+    }
+    card.appendChild(el("div", { class: "rv-slot", "data-n": String(v._n || i + 1) }));
+    return card;
+  }
+
+  // Evidence clips: only same-origin service paths are accepted.
+  function clipUrl(u) {
+    if (!u || typeof u !== "string") return null;
+    try {
+      var parsed = new URL(u, location.href);
+      if (parsed.origin !== location.origin || !/^\/(ui-api|api\/v1)\/jobs\/[^/]+\/clips\/[0-9]+\.mp4$/.test(parsed.pathname)) return null;
+      return parsed.pathname;
+    } catch (e) { return null; }
+  }
+
+  // Muted looping clip that plays only while visible; native controls appear on hover / focus.
+  var clipObserver = "IntersectionObserver" in window ? new IntersectionObserver(function (entries) {
+    entries.forEach(function (en) {
+      var vid = en.target;
+      if (en.isIntersecting && en.intersectionRatio >= 0.5) {
+        var p = vid.play();
+        if (p && p.catch) p.catch(function () {});
+      } else if (!vid.paused) {
+        vid.pause();
+      }
+    });
+  }, { threshold: [0, 0.5] }) : null;
+
+  function renderClip(src, poster, title, t) {
+    var vid = el("video", {
+      class: "vclip__video", src: src, muted: true, loop: true, playsinline: true, preload: "metadata",
+      tabindex: "0", "aria-label": "Видеофрагмент нарушения: " + title,
+      poster: poster && poster.image_base64 ? "data:image/jpeg;base64," + poster.image_base64 : null
+    });
+    vid.muted = true;  // the attribute alone does not mute in every browser
+    // --ar (w/h) lives on the <figure>: it sizes the figure (capped at 100 % of the card) and the
+    // video inherits it as its aspect-ratio, so portrait and landscape clips both fit a phone.
+    var setAr = function (ar) { if (wrap) wrap.style.setProperty("--ar", String(ar)); };
+    var showControls = function () { vid.controls = true; };
+    var hideControls = function () { if (document.activeElement !== vid && !vid.matches(":hover")) vid.controls = false; };
+    vid.addEventListener("mouseenter", showControls);
+    vid.addEventListener("focus", showControls);
+    vid.addEventListener("mouseleave", hideControls);
+    vid.addEventListener("blur", hideControls);
+    if (clipObserver) clipObserver.observe(vid);
+    var wrap = null;
+    vid.addEventListener("loadedmetadata", function () {
+      if (vid.videoWidth && vid.videoHeight) setAr(vid.videoWidth / vid.videoHeight);
+    });
+    wrap = el("figure", { class: "vclip" }, [
+      el("div", { class: "vmedia__label", "aria-hidden": "true", text: "Видеофрагмент" }),
+      vid,
+      t !== null ? el("figcaption", { class: "vclip__cap" }, [
+        el("button", {
+          type: "button", class: "vclip__seek", text: "Смотреть с " + fmtTime(t) + " в записи",
+          onclick: function () { seekTo(t, true); }
+        })
+      ]) : null
+    ]);
+    if (state.aspect) setAr(state.aspect);
+    vid.addEventListener("error", function () {
+      // Clip missing or unplayable: drop it; the frame thumbnails below remain.
+      if (clipObserver) clipObserver.unobserve(vid);
+      if (wrap.parentNode) wrap.parentNode.removeChild(wrap);
+    });
+    return wrap;
+  }
+
+  function safeUrl(u) {
+    if (!u || typeof u !== "string") return null;
+    try {
+      var parsed = new URL(u, location.href);
+      return /^https?:$/.test(parsed.protocol) ? parsed.href : null;
+    } catch (e) { return null; }
+  }
+
+  var LEGAL_CONF_RU = { high: "высокая", medium: "средняя", low: "низкая" };
+  function renderRule(r, label) {
+    var box = el("div", { class: "rule" }, [el("div", { class: "rule__label", text: label })]);
+    if (r.document) box.appendChild(el("div", { class: "rule__doc", text: r.document }));
+    if (r.point) box.appendChild(el("div", { class: "rule__point", text: r.point }));
+    if (r.quote) box.appendChild(el("blockquote", { class: "rule__quote", text: "«" + r.quote + "»" }));
+    var lc = LEGAL_CONF_RU[String(r.legal_conf || "").toLowerCase()];
+    if (lc) box.appendChild(el("div", { class: "rule__conf rule__conf--" + String(r.legal_conf).toLowerCase(), text: "Применимость нормы: " + lc }));
+    var href = safeUrl(r.url);
+    if (href) {
+      var host = "";
+      try { host = new URL(href).hostname.replace(/^www\./, ""); } catch (e) { host = ""; }
+      box.appendChild(el("a", { class: "rule__link", href: href, target: "_blank", rel: "noopener noreferrer", title: href },
+        [host ? "Текст документа на " + host : "Открыть документ", ICONS.external()]));
+    }
+    return box;
+  }
+
+  // ---------- Human review ----------
+  // The automatic result is a hint: a specialist confirms / rejects each violation and records the
+  // final decision. Review inputs render once per job open; later state comes only from the user's
+  // own edits and the POST responses, so polling can never overwrite what is being typed.
+  var REVIEW_DEBOUNCE_MS = 600;
+  var LS_NAME = "forte.reviewer_name", LS_POS = "forte.reviewer_position";
+  var RV_STATUS = {
+    confirmed: { text: "Подтверждено", cls: "rv-chip--confirmed" },
+    rejected: { text: "Отклонено", cls: "rv-chip--rejected" },
+    pending: { text: "Не проверено", cls: "rv-chip--pending" }
+  };
+  var RV_DECISIONS = [
+    ["confirmed", "Нарушение подтверждено"],
+    ["rejected", "Нарушений нет"],
+    ["needs_followup", "Требуется дополнительная проверка"]
+  ];
+  var rv = null; // per-job review session, see renderReview
+
+  function lsGet(k) { try { return window.localStorage.getItem(k) || ""; } catch (e) { return ""; } }
+  function lsSet(k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* storage unavailable */ } }
+  function hhmm(d) { return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); }
+
+  /** Merge patch b into patch a (violation entries merged per number, checklist per item); returns a. */
+  function mergePatch(a, b) {
+    Object.keys(b || {}).forEach(function (k) {
+      if (k === "checklist") {
+        a.checklist = Object.assign({}, a.checklist || {}, b.checklist);
+      } else if (k === "violations") {
+        a.violations = a.violations || {};
+        Object.keys(b.violations).forEach(function (n) {
+          a.violations[n] = Object.assign({}, a.violations[n] || {}, b.violations[n]);
+        });
+      } else {
+        a[k] = b[k];
+      }
+    });
+    return a;
+  }
+
+  // Reviewer checklist (steps the camera cannot verify), served with /ui-api/rules as `checklist`.
+  var CL_STATES = [[true, "Да", "yes"], [false, "Нет", "no"], [null, "—", "unset"]];
+  var checklistP = null;
+  function getChecklist() {
+    if (!checklistP) {
+      checklistP = fetchJSON(API + "/rules").then(function (d) {
+        return Array.isArray(d && d.checklist) ? d.checklist : [];
+      }, function () { checklistP = null; return []; });
+    }
+    return checklistP;
+  }
+
+  function clValue(id) {
+    var v = rv.local.checklist[id];
+    return v === true || v === false ? v : null;
+  }
+
+  function rvRenderChecklistItem(row) {
+    var cur = clValue(row.id);
+    row.btns.forEach(function (b, i) {
+      var on = CL_STATES[i][0] === cur;
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+      b.classList.toggle("is-on", on);
+    });
+    row.node.classList.toggle("cl-item--no", cur === false);
+    row.node.classList.toggle("cl-item--yes", cur === true);
+  }
+
+  function renderChecklist(session, box, items) {
+    if (rv !== session) return;
+    box.textContent = "";
+    if (!items.length) { box.hidden = true; return; }
+    box.hidden = false;
+    var lid = "cl-" + Date.now().toString(36);
+    box.appendChild(el("div", { class: "cl-head" }, [
+      el("span", { class: "field__label", id: lid, text: "Чек-лист проверяющего" }),
+      el("span", { class: "cl-sub", text: "Шаги, которые не видны на видео. Необязательно — не влияет на формирование акта." })
+    ]));
+    var groups = clGroups(items);
+    groups.forEach(function (g, gi) {
+      var list = el("ul", { class: "cl-list", "aria-label": g.name });
+      var count = el("span", { class: "cl-group__count" });
+      var refresh = function () {
+        var n = g.items.filter(function (it) { return clValue(String(it.id)) !== null; }).length;
+        count.textContent = "отмечено " + n + " из " + g.items.length;
+      };
+      var title = el("span", { class: "cl-group__title", text: g.name });
+      if (gi === 0) {
+        box.appendChild(el("div", { class: "cl-group cl-group--open", role: "group", "aria-labelledby": lid },
+          [el("div", { class: "cl-group__head" }, [title, count]), list]));
+      } else {
+        box.appendChild(el("details", { class: "cl-group" },
+          [el("summary", { class: "cl-group__head" }, [title, count]), list]));
+      }
+      g.items.forEach(function (it) { clItem(session, list, it, refresh); });
+      refresh();
+    });
+  }
+
+  /** Checklist items grouped by `group` (fixed order first, unknown groups after; missing -> «Общие»). */
+  var CL_GROUP_ORDER = ["Общие", "Выдача", "Инкассация", "Сомнительные купюры"];
+  function clGroups(items) {
+    var by = {}, names = CL_GROUP_ORDER.slice();
+    items.forEach(function (it) {
+      if (!it || !it.id) return;
+      var g = typeof it.group === "string" && it.group ? it.group : "Общие";
+      if (names.indexOf(g) < 0) names.push(g);
+      (by[g] = by[g] || []).push(it);
+    });
+    return names.filter(function (n) { return by[n]; }).map(function (n) { return { name: n, items: by[n] }; });
+  }
+
+  function clItem(session, list, it, refresh) {
+    var id = String(it.id), label = String(it.label_ru || id);
+    var row = { id: id, node: el("li", { class: "cl-item", "data-id": id }) };
+    row.btns = CL_STATES.map(function (st) {
+      return el("button", { type: "button", class: "seg__btn cl-btn cl-btn--" + st[2], "aria-pressed": "false",
+        "aria-label": label + ": " + (st[0] === null ? "не проверялось" : st[1]),
+        text: st[1], onclick: function () {
+          session.local.checklist[id] = st[0];
+          rvRenderChecklistItem(row);
+          refresh();
+          var p = { checklist: {} };
+          p.checklist[id] = st[0];
+          rvQueue(p, "job", false);
+        } });
+    });
+    var basis = "Основание: " + [it.document_short || it.document, it.basis].filter(Boolean).join(", ");
+    var meta = el("div", { class: "cl-meta" }, [el("span", { class: "cl-basis", title: it.quote ? String(it.quote) : null, text: basis })]);
+    if (it.quote) {
+      meta.appendChild(el("details", { class: "cl-quote" }, [
+        el("summary", { text: "Текст нормы" }),
+        el("blockquote", { text: String(it.quote) })
+      ]));
+    }
+    row.node.appendChild(el("div", { class: "cl-text" }, [el("span", { class: "cl-label", text: label }), meta]));
+    row.node.appendChild(el("div", { class: "seg cl-seg", role: "group", "aria-label": label }, row.btns));
+    list.appendChild(row.node);
+    rvRenderChecklistItem(row);
+  }
+
+  function rvEntry(n) {
+    var e = rv.local.violations[String(n)];
+    return e || { status: "pending", comment: "" };
+  }
+
+  function rvSetIndicator(origin, kind, msg) {
+    var node = rv.ui.ind[origin];
+    if (!node) return;
+    node.textContent = "";
+    node.className = "rv-save" + (kind ? " rv-save--" + kind : "");
+    if (kind === "saving") node.textContent = "Сохранение…";
+    else if (kind === "saved") node.textContent = "Сохранено ✓ " + hhmm(new Date());
+    else if (kind === "error") {
+      node.appendChild(el("span", { text: "Не сохранено: " + msg }));
+      node.appendChild(el("button", { type: "button", class: "btn btn--text btn--xs", text: "Повторить",
+        onclick: function () { rvFlush(); } }));
+    }
+  }
+
+  function rvQueue(patch, origin, debounce) {
+    var session = rv;
+    mergePatch(session.patch, patch);
+    session.origins[origin] = true;
+    clearTimeout(session.timer);
+    session.timer = null;
+    if (debounce) session.timer = setTimeout(function () { session.timer = null; rvFlush(session); }, REVIEW_DEBOUNCE_MS);
+    else rvFlush(session);
+  }
+
+  function rvHasWork(session) {
+    return session.inflight || session.timer || Object.keys(session.patch).length > 0;
+  }
+
+  /** Send the accumulated patch (one request at a time per job). */
+  function rvFlush(session) {
+    session = session || rv;
+    if (!session) return;
+    clearTimeout(session.timer);
+    session.timer = null;
+    if (session.inflight) return; // the response handler sends what accumulated meanwhile
+    // Reviewer fields travel with every save once they differ from the stored review.
+    if (session.ui.name) {
+      var name = session.ui.name.value.trim(), pos = session.ui.pos.value.trim();
+      var saved = session.data || {};
+      if (name !== (saved.reviewer_name || "") && session.patch.reviewer_name === undefined && session.sent.reviewer_name !== name) session.patch.reviewer_name = name;
+      if (pos !== (saved.reviewer_position || "") && session.patch.reviewer_position === undefined && session.sent.reviewer_position !== pos) session.patch.reviewer_position = pos;
+    }
+    var patch = session.patch;
+    if (!Object.keys(patch).length) { rvSettle(session); return; }
+    var origins = Object.keys(session.origins);
+    session.patch = {};
+    session.origins = {};
+    session.inflight = true;
+    if (patch.reviewer_name !== undefined) session.sent.reviewer_name = patch.reviewer_name;
+    if (patch.reviewer_position !== undefined) session.sent.reviewer_position = patch.reviewer_position;
+    var live = function () { return rv === session; };
+    origins.forEach(function (o) { if (live()) rvSetIndicator(o, "saving"); });
+    fetch(API + "/jobs/" + encodeURIComponent(session.jobId) + "/review", {
+      method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(patch), cache: "no-store"
+    }).then(function (r) {
+      if (r.status === 401) toLogin();
+      return r.text().then(function (t) {
+        var body = null;
+        try { body = t ? JSON.parse(t) : null; } catch (e) { body = null; }
+        if (!r.ok) throw new Error(errorMessage(r.status, body));
+        return body;
+      });
+    }, function () { throw new Error("нет связи с сервером"); }).then(function (job) {
+      session.inflight = false;
+      if (job && job.review) session.data = job.review;
+      if (live()) origins.forEach(function (o) { if (!session.origins[o]) rvSetIndicator(o, "saved"); });
+      rvFlush(session); // sends what accumulated meanwhile, or settles the waiters
+    }).catch(function (err) {
+      session.inflight = false;
+      session.sent = {}; // reviewer fields are re-sent with the retry
+      // Keep the failed changes; anything edited since then wins over them.
+      session.patch = mergePatch(patch, session.patch);
+      origins.forEach(function (o) { session.origins[o] = true; });
+      if (live()) Object.keys(session.origins).forEach(function (o) { rvSetIndicator(o, "error", err.message); });
+      rvSettle(session, true);
+    });
+  }
+
+  function rvSettle(session, failed) {
+    if (!failed && rvHasWork(session)) return;
+    var ws = session.waiters;
+    session.waiters = [];
+    ws.forEach(function (fn) { fn(!failed); });
+  }
+
+  /** Resolves once everything typed so far has been sent (true) or a save failed (false). */
+  function rvFlushNow() {
+    var session = rv;
+    return new Promise(function (resolve) {
+      session.waiters.push(resolve);
+      if (!session.inflight) rvFlush(session);
+    });
+  }
+
+  function rvSummary() {
+    if (!rv) return;
+    var m = rv.items.length, n = 0, conf = 0, rej = 0;
+    rv.items.forEach(function (it) {
+      var st = rvEntry(it.n).status;
+      if (st === "confirmed") { n++; conf++; } else if (st === "rejected") { n++; rej++; }
+    });
+    var u = rv.ui;
+    if (m) {
+      u.progressText.textContent = "Проверено " + n + " из " + m;
+      u.progressDetail.textContent = n ? "подтверждено " + conf + ", отклонено " + rej : "";
+      u.progressFill.style.width = Math.round((n / m) * 100) + "%";
+      u.progressBar.setAttribute("aria-valuenow", String(n));
+    } else {
+      u.progressText.textContent = "Автоматических срабатываний нет";
+      u.progressDetail.textContent = "подтвердите заключение «Нарушений нет»";
+    }
+    // Contradiction guard (a hint, never a block): decision vs confirmed violations.
+    var dec = rv.local.decision, warn = "";
+    if (dec === "rejected" && conf > 0) warn = "Выбрано «Нарушений нет», но подтверждено срабатываний: " + conf + ". Проверьте итоговое решение.";
+    else if (dec === "confirmed" && conf === 0) warn = "Выбрано «Нарушение подтверждено», но ни одно срабатывание не подтверждено. Проверьте итоговое решение.";
+    u.decisionWarn.textContent = warn;
+    u.decisionWarn.hidden = !warn;
+    var named = u.name.value.trim().length > 0;
+    u.actBtn.disabled = !named;
+    u.actHint.hidden = named;
+  }
+
+  function rvRenderDecision() {
+    var cur = rv.local.decision || null;
+    rv.ui.decisionBtns.forEach(function (b) {
+      var on = b.getAttribute("data-value") === cur;
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+      b.classList.toggle("is-on", on);
+    });
+  }
+
+  function rvRenderItem(it) {
+    var e = rvEntry(it.n), st = RV_STATUS[e.status] ? e.status : "pending";
+    it.chip.className = "rv-chip " + RV_STATUS[st].cls;
+    it.chip.textContent = RV_STATUS[st].text;
+    it.confirm.setAttribute("aria-pressed", st === "confirmed" ? "true" : "false");
+    it.reject.setAttribute("aria-pressed", st === "rejected" ? "true" : "false");
+    it.confirm.classList.toggle("is-on", st === "confirmed");
+    it.reject.classList.toggle("is-on", st === "rejected");
+    it.comment.placeholder = st === "rejected" ? "Причина отклонения" : "Комментарий проверяющего (необязательно)";
+    it.card.classList.toggle("vcard--confirmed", st === "confirmed");
+    it.card.classList.toggle("vcard--rejected", st === "rejected");
+  }
+
+  function rvSetStatus(it, status) {
+    var cur = rvEntry(it.n).status;
+    var next = cur === status ? "pending" : status; // clicking the active button returns to pending
+    var key = String(it.n);
+    rv.local.violations[key] = Object.assign({}, rvEntry(it.n), { status: next });
+    rvRenderItem(it);
+    rvSummary();
+    var p = { violations: {} };
+    p.violations[key] = { status: next };
+    rvQueue(p, key, false);
+    if (next === "rejected" && !it.comment.value.trim()) it.comment.focus();
+  }
+
+  function renderReview(job, vs) {
+    // A save still waiting on its debounce for the previous job is sent right away.
+    if (rv && rv.timer) rvFlush(rv);
+    var data = job.review && typeof job.review === "object" ? job.review : null;
+    rv = {
+      jobId: String(job.job_id || state.jobId), data: data,
+      local: { decision: data ? data.decision || null : null, violations: {},
+        checklist: Object.assign({}, (data && data.checklist && typeof data.checklist === "object") ? data.checklist : {}) },
+      patch: {}, origins: {}, sent: {}, inflight: false, timer: null, waiters: [], items: [], ui: { ind: {} }
+    };
+    var dv = (data && data.violations) || {};
+    Object.keys(dv).forEach(function (k) { rv.local.violations[k] = Object.assign({}, dv[k]); });
+
+    var u = rv.ui;
+    var uid = "rv-" + Date.now().toString(36);
+    u.name = el("input", { type: "text", id: uid + "-name", class: "input", maxlength: "200", autocomplete: "name",
+      placeholder: "Фамилия И. О." });
+    u.pos = el("input", { type: "text", id: uid + "-pos", class: "input", maxlength: "200", autocomplete: "organization-title",
+      placeholder: "Например, специалист службы внутреннего контроля" });
+    u.name.value = data && data.reviewer_name ? data.reviewer_name : lsGet(LS_NAME);
+    u.pos.value = data && data.reviewer_position ? data.reviewer_position : lsGet(LS_POS);
+    [[u.name, "reviewer_name", LS_NAME], [u.pos, "reviewer_position", LS_POS]].forEach(function (f) {
+      f[0].addEventListener("input", function () {
+        lsSet(f[2], f[0].value.trim());
+        rvSummary();
+        var p = {};
+        p[f[1]] = f[0].value.trim();
+        rvQueue(p, "job", true);
+      });
+    });
+
+    u.decisionBtns = RV_DECISIONS.map(function (d) {
+      return el("button", { type: "button", class: "seg__btn seg__btn--" + d[0], "data-value": d[0], "aria-pressed": "false",
+        text: d[1], onclick: function () {
+          var next = rv.local.decision === d[0] ? null : d[0];
+          rv.local.decision = next;
+          rvRenderDecision();
+          rvSummary();
+          rvQueue({ decision: next }, "job", false);
+        } });
+    });
+    u.decisionComment = el("textarea", { class: "input rv-comment", rows: "2", maxlength: "2000", id: uid + "-dc",
+      placeholder: "Комментарий к решению (необязательно)" });
+    u.decisionComment.value = (data && data.decision_comment) || "";
+    u.decisionWarn = el("p", { class: "rv-warn", role: "status", hidden: true });
+    u.decisionComment.addEventListener("input", function () {
+      rvQueue({ decision_comment: u.decisionComment.value.trim() }, "job", true);
+    });
+
+    u.progressText = el("strong", { class: "rv-progress__text" });
+    u.progressDetail = el("span", { class: "rv-progress__detail" });
+    u.progressFill = el("span", { class: "rv-progress__fill" });
+    u.progressBar = el("span", { class: "rv-progress__bar", role: "progressbar", "aria-label": "Проверено срабатываний",
+      "aria-valuemin": "0", "aria-valuemax": String(vs.length), "aria-valuenow": "0" }, [u.progressFill]);
+    u.actBtn = el("button", { type: "button", class: "btn btn--primary", "aria-describedby": uid + "-acthint",
+      onclick: openAct }, [
+      icon("0 0 20 20", [["path", { d: "M5 2.5h7l3 3v12H5z M12 2.5v3h3 M7.5 9.5h5 M7.5 12.5h5 M7.5 15h3", fill: "none", stroke: "currentColor", "stroke-width": "1.5", "stroke-linejoin": "round" }]], "icon"),
+      "Сформировать акт"
+    ]);
+    u.actHint = el("span", { class: "rv-hint", id: uid + "-acthint", text: "Укажите ФИО проверяющего" });
+    u.ind.job = el("span", { class: "rv-save", role: "status", "aria-live": "polite" });
+
+    var panel = $("review-panel");
+    panel.textContent = "";
+    panel.hidden = false;
+    panel.appendChild(el("div", { class: "rv-head" }, [
+      el("div", null, [
+        el("h3", { class: "section-title", id: "review-title", text: "Проверка специалистом" }),
+        el("p", { class: "rv-lead", text: "Автоматический результат — подсказка для проверки. Подтвердите или отклоните каждое срабатывание и примите итоговое решение." })
+      ]),
+      u.ind.job
+    ]));
+    panel.appendChild(el("div", { class: "rv-progress" }, [
+      el("div", { class: "rv-progress__row" }, [u.progressText, u.progressDetail]),
+      vs.length ? u.progressBar : null
+    ]));
+    panel.appendChild(el("div", { class: "rv-fields" }, [
+      el("div", { class: "field" }, [el("label", { class: "field__label", for: uid + "-name", text: "ФИО проверяющего" }), u.name]),
+      el("div", { class: "field" }, [el("label", { class: "field__label", for: uid + "-pos", text: "Должность" }), u.pos])
+    ]));
+    panel.appendChild(el("div", { class: "field rv-decision" }, [
+      el("span", { class: "field__label", id: uid + "-dl", text: "Итоговое решение" }),
+      el("div", { class: "seg seg--decision", role: "group", "aria-labelledby": uid + "-dl" }, u.decisionBtns),
+      u.decisionWarn,
+      el("label", { class: "visually-hidden", for: uid + "-dc", text: "Комментарий к решению" }),
+      u.decisionComment
+    ]));
+    u.checklist = el("div", { class: "rv-checklist", hidden: true });
+    panel.appendChild(u.checklist);
+    var clSession = rv;
+    getChecklist().then(function (items) { renderChecklist(clSession, u.checklist, items); });
+    panel.appendChild(el("div", { class: "rv-actions" }, [
+      el("div", { class: "rv-actions__main" }, [u.actBtn, u.actHint]),
+      el("a", { class: "rv-export", href: API + "/feedback.jsonl", download: "feedback.jsonl",
+        title: "Размеченные решения проверяющих (JSONL) — данные для дообучения и настройки порогов",
+        text: "Выгрузить разметку (JSONL)" })
+    ]));
+
+    // Per-violation review rows (slots were placed by renderViolation).
+    vs.forEach(function (v, i) {
+      var n = v._n || i + 1;
+      var slot = document.querySelector('.rv-slot[data-n="' + n + '"]');
+      if (!slot) return;
+      var it = { n: n, card: slot.closest(".vcard") };
+      it.chip = el("span", { class: "rv-chip" });
+      it.confirm = el("button", { type: "button", class: "seg__btn seg__btn--confirm", "aria-pressed": "false",
+        onclick: function () { rvSetStatus(it, "confirmed"); } }, [ICONS.check(), "Подтвердить"]);
+      it.reject = el("button", { type: "button", class: "seg__btn seg__btn--reject", "aria-pressed": "false",
+        onclick: function () { rvSetStatus(it, "rejected"); } }, [
+        icon("0 0 24 24", [["path", { d: "M7 7l10 10M17 7L7 17", fill: "none", stroke: "currentColor", "stroke-width": "2.6", "stroke-linecap": "round" }]]),
+        "Отклонить"]);
+      it.comment = el("textarea", { class: "input rv-comment", rows: "2", maxlength: "2000",
+        "aria-label": "Комментарий проверяющего к нарушению " + n });
+      it.comment.value = rvEntry(n).comment || "";
+      it.comment.addEventListener("input", function () {
+        var key = String(n);
+        rv.local.violations[key] = Object.assign({}, rvEntry(n), { comment: it.comment.value });
+        var p = { violations: {} };
+        p.violations[key] = { comment: it.comment.value.trim() };
+        rvQueue(p, key, true);
+      });
+      rv.ui.ind[String(n)] = el("span", { class: "rv-save", role: "status", "aria-live": "polite" });
+      slot.className = "rv-slot review-row";
+      slot.appendChild(el("div", { class: "review-row__head" }, [
+        el("span", { class: "review-row__label", text: "Решение проверяющего" }), it.chip, rv.ui.ind[String(n)]
+      ]));
+      slot.appendChild(el("div", { class: "review-row__body" }, [
+        el("div", { class: "seg", role: "group", "aria-label": "Решение по нарушению " + n }, [it.confirm, it.reject]),
+        it.comment
+      ]));
+      rv.items.push(it);
+      rvRenderItem(it);
+    });
+    rvRenderDecision();
+    rvSummary();
+  }
+
+  function openAct() {
+    if (!rv || !rv.ui.name.value.trim()) return;
+    var url = new URL("act.html#job=" + encodeURIComponent(rv.jobId), location.href).href;
+    var session = rv;
+    var dirty = rvHasWork(session) ||
+      session.ui.name.value.trim() !== ((session.data && session.data.reviewer_name) || "") ||
+      session.ui.pos.value.trim() !== ((session.data && session.data.reviewer_position) || "");
+    if (!dirty) { window.open(url, "_blank", "noopener"); return; }
+    // Open the tab inside the click (popup blockers), point it at the act once the save landed.
+    var w = window.open("about:blank", "_blank");
+    rvFlushNow().then(function (ok) {
+      if (!ok) toast("Последние изменения не сохранены — акт сформирован по сохранённым данным");
+      if (w && !w.closed) { try { w.opener = null; } catch (e) { /* ignore */ } w.location.replace(url); }
+      else window.open(url, "_blank", "noopener");
+    });
+  }
+
+  // ---------- Video + timeline ----------
+  /** Landscape source (e.g. a different camera): wider player column, width-driven video sizing. */
+  function setLandscape(on) {
+    var g = document.querySelector(".result__grid");
+    if (g) g.classList.toggle("is-landscape", !!on);
+  }
+  video.addEventListener("loadedmetadata", function () {
+    if (video.videoWidth && video.videoHeight) {
+      video.style.aspectRatio = video.videoWidth + " / " + video.videoHeight;
+      setLandscape(video.videoWidth / video.videoHeight > 1.05);
+    }
+  });
+  function effectiveDuration() {
+    var d = num(video.duration);
+    if (d && isFinite(d) && d > 0) return d;
+    return state.duration && state.duration > 0 ? state.duration : null;
+  }
+
+  function renderTimeline() {
+    var markers = $("timeline-markers");
+    markers.textContent = "";
+    var d = effectiveDuration();
+    // The start label is the start of the recording, always 00:00 (it used to be the playhead time,
+    // which read «00:56 … 00:56» once playback had reached the end). The playhead has its own readout.
+    $("tl-start").textContent = fmtTime(0);
+    $("tl-end").textContent = d ? fmtTime(d) : "—";
+    renderPlayhead();
+    renderStageStrip();
+    if (!d) return;
+    state.violations.forEach(function (v, i) {
+      var t = startOf(v);
+      if (t === null) return;
+      var end = num(v.end_sec);
+      var left = Math.max(0, Math.min(100, (t / d) * 100));
+      var width = end !== null && end > t ? Math.min(100 - left, ((end - t) / d) * 100) : 0;
+      var title = (v.title_ru || v.type || "Нарушение") + " · " + fmtTime(t);
+      markers.appendChild(el("button", {
+        type: "button", class: "marker", "data-index": i, title: title, "aria-label": "Нарушение " + (v._n || i + 1) + ": " + title,
+        style: "left:" + left + "%;" + (width ? "width:" + width + "%;transform:none;" : ""),
+        onclick: function (e) { e.stopPropagation(); seekTo(t, true, true); highlightViolation(i, true); }
+      }));
+    });
+  }
+
+  $("timeline").addEventListener("click", function (e) {
+    var d = effectiveDuration();
+    if (!d) return;
+    var rect = this.getBoundingClientRect();
+    var frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    seekTo(frac * d, false, true);
+  });
+
+  var pendingSeek = null; // deferred seek waiting for loadedmetadata of the current src
+  function cancelPendingSeek() {
+    if (pendingSeek) { video.removeEventListener("loadedmetadata", pendingSeek); pendingSeek = null; }
+  }
+  function seekTo(t, play, noScroll) {
+    var go = function () {
+      pendingSeek = null;
+      // Never seek onto (or past) the end: a target beyond the real duration would leave the
+      // player parked at its last frame. Clamp to the duration known once metadata is in.
+      var d = effectiveDuration();
+      var target = Math.max(0, num(t) || 0);
+      if (d) target = Math.min(target, Math.max(0, d - 0.25));
+      try { video.currentTime = target; } catch (e) { /* ignore */ }
+      if (play) { var p = video.play(); if (p && p.catch) p.catch(function () {}); }
+    };
+    cancelPendingSeek();
+    if (video.readyState >= 1) go();
+    else { pendingSeek = go; video.addEventListener("loadedmetadata", go, { once: true }); }
+    if (!noScroll) {
+      var player = document.querySelector(".player");
+      var r = player.getBoundingClientRect();
+      if (r.top < 0 || r.bottom > window.innerHeight) player.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+
+  var activeIdx = -1;
+  /** Stop playback and drop per-job player state (called when switching jobs / sources). */
+  function resetPlayer() {
+    cancelPendingSeek();
+    try { video.pause(); } catch (e) { /* ignore */ }
+    activeIdx = -1;
+    liveClear();
+    document.querySelectorAll(".vcard.is-active, .marker.is-active").forEach(function (n) { n.classList.remove("is-active"); });
+  }
+  function canReupload() {
+    return !!state.lastFile && !!state.jobId && state.lastFileJobId === state.jobId;
+  }
+  function highlightViolation(i, scroll) {
+    if (i === activeIdx && !scroll) return;
+    activeIdx = i;
+    document.querySelectorAll(".vcard.is-active, .marker.is-active").forEach(function (n) { n.classList.remove("is-active"); });
+    if (i < 0) return;
+    var card = $("violation-" + i);
+    if (card) {
+      card.classList.add("is-active");
+      if (scroll) card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+    var m = document.querySelector('.marker[data-index="' + i + '"]');
+    if (m) m.classList.add("is-active");
+  }
+
+  /** Playhead bar + «текущая позиция» readout; duration from the video once finite, else video_meta. */
+  function renderPlayhead() {
+    var d = effectiveDuration();
+    var cur = num(video.currentTime) || 0;
+    if (d && cur > d) cur = d;
+    var pct = d ? Math.max(0, Math.min(100, (cur / d) * 100)) : 0;
+    $("timeline-played").style.width = pct + "%";
+    $("timeline-head").style.left = pct + "%";
+    $("tl-cur").textContent = fmtTime(cur) + (d ? " / " + fmtTime(d) : "");
+    var end = d ? fmtTime(d) : "—";
+    if ($("tl-end").textContent !== end) $("tl-end").textContent = end;
+  }
+  video.addEventListener("loadedmetadata", renderTimeline);
+  video.addEventListener("durationchange", renderTimeline);
+  video.addEventListener("emptied", renderPlayhead);
+  video.addEventListener("seeked", renderPlayhead);
+  video.addEventListener("timeupdate", function () {
+    renderPlayhead();
+    var d = effectiveDuration();
+    if (!d) return;
+    var cur = video.currentTime, found = -1;
+    state.violations.forEach(function (v, i) {
+      var t = startOf(v);
+      if (t === null) return;
+      var end = num(v.end_sec);
+      var stop = end !== null && end > t ? end : t + 2;
+      if (cur >= t - 0.25 && cur <= stop) found = i;
+    });
+    highlightViolation(found, false);
+  });
+  function removeVideoError() {
+    var old = document.querySelector(".player__error");
+    if (old) old.remove();
+  }
+  video.addEventListener("error", function () {
+    if (!video.getAttribute("src")) return;
+    removeVideoError();
+    var msg = el("div", { class: "notice notice--warn player__error", style: "margin-top:10px" }, [
+      el("span", { text: "Не удалось воспроизвести видео в браузере. Кадры-доказательства и таймкоды доступны ниже." })
+    ]);
+    var inner = $("video").closest(".player__inner");
+    inner.insertBefore(msg, inner.querySelector(".timeline-wrap"));
+  });
+
+  // ---------- Lightbox ----------
+  var lightbox = $("lightbox");
+  function openLightbox(frames, index, title) {
+    state.lightbox = { frames: frames, index: index, title: title };
+    renderLightbox();
+    if (!lightbox.open) lightbox.showModal();
+  }
+  function renderLightbox() {
+    var lb = state.lightbox, fr = lb.frames[lb.index];
+    if (!fr) return;
+    var ts = num(fr.timestamp_sec);
+    $("lightbox-img").src = "data:image/jpeg;base64," + fr.image_base64;
+    $("lightbox-img").alt = (lb.title || "Кадр") + " — " + fmtTime(ts);
+    $("lightbox-caption").textContent = (lb.title ? lb.title + " · " : "") + "Кадр " + (lb.index + 1) + " из " + lb.frames.length + " · " + fmtTime(ts);
+    var multi = lb.frames.length > 1;
+    $("lightbox-prev").hidden = !multi;
+    $("lightbox-next").hidden = !multi;
+    $("lightbox-seek").hidden = ts === null;
+  }
+  function stepLightbox(d) {
+    var lb = state.lightbox, n = lb.frames.length;
+    if (n < 2) return;
+    lb.index = (lb.index + d + n) % n;
+    renderLightbox();
+  }
+  $("lightbox-prev").addEventListener("click", function () { stepLightbox(-1); });
+  $("lightbox-next").addEventListener("click", function () { stepLightbox(1); });
+  $("lightbox-seek").addEventListener("click", function () {
+    var fr = state.lightbox.frames[state.lightbox.index];
+    lightbox.close();
+    if (fr) seekTo(num(fr.timestamp_sec) || 0, false);
+  });
+  lightbox.addEventListener("keydown", function (e) {
+    if (e.key === "ArrowLeft") { e.preventDefault(); stepLightbox(-1); }
+    if (e.key === "ArrowRight") { e.preventDefault(); stepLightbox(1); }
+  });
+
+  // Generic dialog closing: [data-close] buttons and backdrop clicks.
+  document.querySelectorAll("dialog").forEach(function (dlg) {
+    dlg.addEventListener("click", function (e) {
+      if (e.target === dlg || (e.target.closest && e.target.closest("[data-close]"))) dlg.close();
+    });
+  });
+  // Clicking the empty area around the image in the full-screen lightbox closes it.
+  lightbox.querySelector(".lightbox__figure").addEventListener("click", function (e) {
+    if (e.target === this) lightbox.close();
+  });
+
+  // ---------- Rules modal ----------
+  var rulesModal = $("rules-modal"), rulesLoaded = false;
+  $("rules-open").addEventListener("click", function () {
+    rulesModal.showModal();
+    if (!rulesLoaded) loadRules();
+  });
+  // Readable version of a description template: {t} -> «мм:сс», other placeholders removed,
+  // then the same tidy-up the service applies (no double spaces / space before punctuation).
+  function templatePreview(tpl) {
+    if (!tpl || typeof tpl !== "string") return "";
+    var s = tpl.replace(/\{([^{}]*)\}/g, function (_, name) { return name.trim() === "t" ? "мм:сс" : ""; });
+    var prev = null;
+    while (prev !== s) {
+      prev = s;
+      s = s.replace(/[ \t ]{2,}/g, " ").replace(/[ \t ]+([.,;:!?])/g, "$1").replace(/,(?=[.,;:!?])/g, "");
+    }
+    return s.trim();
+  }
+
+  function loadRules() {
+    var body = $("rules-body");
+    fetchJSON(API + "/rules").then(function (data) {
+      rulesLoaded = true;
+      body.textContent = "";
+      var rules = (data && data.rules) || data || {};
+      var entries = Array.isArray(rules)
+        ? rules.map(function (r) { return [r.id || r.type || "", r]; })
+        : Object.keys(rules).map(function (k) { return [k, rules[k]]; });
+      if (!entries.length) { body.appendChild(el("p", { class: "empty", text: "Правила не загружены." })); return; }
+      var anyPlaceholder = entries.some(function (e) { return e[1] && e[1].placeholder; });
+      if (anyPlaceholder) {
+        body.appendChild(el("div", { class: "notice notice--warn", style: "margin-top:14px" }, [
+          el("span", { text: "Часть правил содержит временные (демонстрационные) формулировки и будет заменена ссылками на утверждённые нормативные документы." })
+        ]));
+      }
+      body.appendChild(el("p", { class: "card__hint", style: "margin-top:12px", text: "Типы нарушений, которые выявляет система (" + entries.length + "), и нормы, на которые ссылаются отчёты: документ, пункт, цитата и ссылка на официальный текст." }));
+      body.appendChild(el("nav", { class: "rule-index", "aria-label": "Быстрый переход к типу" }, entries.map(function (e) {
+        return e[0] ? el("button", { type: "button", class: "type-id", title: (e[1] && e[1].title_ru) || e[0], text: e[0],
+          onclick: function () { var n = $("rule-" + e[0]); if (n) n.scrollIntoView({ behavior: "smooth", block: "start" }); } }) : null;
+      })));
+      entries.forEach(function (e) {
+        var id = e[0], r = e[1] || {};
+        var titleRow = el("div", { class: "rule-entry__title" }, [
+          id ? el("span", { class: "type-id", text: id }) : null, r.title_ru || id
+        ]);
+        if (r.placeholder) titleRow.appendChild(el("span", { class: "badge-placeholder", text: "черновик" }));
+        var entry = el("section", { class: "rule-entry", id: id ? "rule-" + id : null }, [
+          titleRow,
+          r.title_en ? el("div", { class: "rule-entry__en", text: r.title_en }) : null
+        ]);
+        var tpl = templatePreview(r.description_template);
+        if (tpl) entry.appendChild(el("p", { class: "rule-entry__tpl", text: tpl }));
+        var cits = (Array.isArray(r.citations) ? r.citations : []).filter(Boolean);
+        cits.forEach(function (c, ci) { entry.appendChild(renderRule(c, ci === 0 ? "Основание" : "Дополнительно")); });
+        if (!cits.length) {
+          entry.appendChild(el("div", { class: "rule rule--none" }, [
+            el("div", { class: "rule__label", text: "Основание" }),
+            el("div", { class: "rule__none", text: "Ссылка на норму не приводится — событие проверяет специалист." })
+          ]));
+        }
+        body.appendChild(entry);
+      });
+    }).catch(function (err) {
+      body.textContent = "";
+      body.appendChild(el("p", { class: "form-error", text: "Не удалось загрузить нормативную базу: " + err.message }));
+    });
+  }
+
+  // ---------- History ----------
+  var historyTimer = null;
+  function statusBadge(job) {
+    if (job.status === "processing") {
+      var p = num(job.progress);
+      return el("span", { class: "status status--processing" }, [el("span", { class: "status__dot" }), "В обработке" + (p ? " · " + Math.round(p * 100) + "%" : "")]);
+    }
+    if (job.status === "failed") return el("span", { class: "status status--failed" }, [el("span", { class: "status__dot" }), "Ошибка"]);
+    return el("span", { class: "status status--done" }, [el("span", { class: "status__dot" }), "Завершена"]);
+  }
+  function verdictBadge(job) {
+    if (job.status !== "done") {
+      // Desktop shows the status in its own column; on phones that column is hidden.
+      return el("span", null, [el("span", { class: "muted hide-sm", text: "—" }), el("span", { class: "show-sm" }, [statusBadge(job)])]);
+    }
+    var n = Array.isArray(job.violations) ? job.violations.length : num(job.violations_count);
+    var bad = job.verdict === "violation";
+    var items = [el("span", { class: "status " + (bad ? "status--violation" : "status--ok") }, [el("span", { class: "status__dot" }), bad ? "Нарушения" : "Без нарушений"])];
+    if (job.partial) items.push(el("span", { class: "muted partial-flag", title: "Анализ прерван по лимиту времени", text: "неполный" }));
+    return el("span", null, items);
+  }
+  function refreshHistory() {
+    clearTimeout(historyTimer);
+    return fetchJSON(API + "/jobs").then(function (data) {
+      var jobs = (data && Array.isArray(data.jobs)) ? data.jobs : (Array.isArray(data) ? data : []);
+      renderHistory(jobs.slice(0, HISTORY_LIMIT));
+      if (jobs.some(function (j) { return j && j.status === "processing"; })) {
+        historyTimer = setTimeout(refreshHistory, 4000);
+      }
+    }).catch(function () {
+      var tbody = $("history-body");
+      tbody.textContent = "";
+      $("history-empty").hidden = false;
+      $("history-empty").textContent = "Не удалось загрузить историю проверок.";
+    });
+  }
+  function renderHistory(jobs) {
+    var tbody = $("history-body");
+    tbody.textContent = "";
+    $("history-table").hidden = jobs.length === 0;
+    $("history-empty").hidden = jobs.length > 0;
+    $("history-empty").textContent = "Проверок пока нет. Загрузите первое видео, чтобы начать.";
+    var navCount = $("nav-count");
+    if (navCount) navCount.textContent = String(jobs.length);
+    jobs.forEach(function (job) {
+      if (!job || !job.job_id) return;
+      var id = String(job.job_id);
+      var n = job.status === "done" ? (Array.isArray(job.violations) ? job.violations.length : (num(job.violations_count) || 0)) : null;
+      var open = function () {
+        if (location.hash === "#job=" + encodeURIComponent(id)) openJob(id);
+        else location.hash = "job=" + encodeURIComponent(id);
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      };
+      var tr = el("tr", {
+        tabindex: "0", "data-job": id, "aria-label": "Открыть проверку " + (job.filename || id),
+        onclick: open,
+        onkeydown: function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }
+      }, [
+        el("td", { class: "muted", text: fmtDate(job.created_at) }),
+        el("td", { class: "fname", title: job.filename || id, text: job.filename || id }),
+        el("td", { class: "col-hide-sm" }, [statusBadge(job)]),
+        el("td", null, [verdictBadge(job)]),
+        el("td", { class: "num col-hide-sm", text: n === null ? "—" : String(n) })
+      ]);
+      tbody.appendChild(tr);
+    });
+    markCurrentHistory();
+  }
+  function markCurrentHistory() {
+    document.querySelectorAll("#history-body tr").forEach(function (tr) {
+      tr.classList.toggle("is-current", !!state.jobId && tr.getAttribute("data-job") === state.jobId);
+    });
+  }
+  $("history-refresh").addEventListener("click", function () { refreshHistory().then(function () { toast("История обновлена"); }); });
+
+  // ---------- Routing ----------
+  function jobFromHash() {
+    var m = /(?:^#|&)job=([^&]+)/.exec(location.hash);
+    if (!m) return null;
+    try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; }
+  }
+  var lastRoutedHash = null;
+  function route() {
+    var hash = location.hash;
+    if (hash === lastRoutedHash) return; // hashchange + popstate may both fire
+    lastRoutedHash = hash;
+    if (hash && hash.indexOf("job=") === -1) return; // in-page anchors are not routes
+    var id = jobFromHash();
+    if (id) { if (id !== state.jobId || !state.job || sections.upload.hidden === false) openJob(id); }
+    else if (state.jobId) goHome();
+  }
+  window.addEventListener("hashchange", route);
+  window.addEventListener("popstate", route);
+
+  // In-page anchors scroll without touching the hash (the hash holds the job route).
+  document.querySelectorAll('a[href^="#"]:not(#brand-link)').forEach(function (a) {
+    a.addEventListener("click", function (e) {
+      var target = document.querySelector(a.getAttribute("href"));
+      if (!target) return;
+      e.preventDefault();
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (target.id === "main") { target.setAttribute("tabindex", "-1"); target.focus({ preventScroll: true }); }
+    });
+  });
+
+  // ---------- Shell: rules shortcuts, service readiness (/healthz) ----------
+  document.querySelectorAll("[data-rules-open]").forEach(function (b) {
+    b.addEventListener("click", function () { $("rules-open").click(); });
+  });
+
+  var HEALTH_MS = 15000, HEALTH_TIMEOUT_MS = 6000, healthTimer = null, healthBusy = false;
+  function setReadiness(kind, title, text) {
+    var box = $("readiness");
+    if (!kind) { box.hidden = true; return; }
+    box.className = "readiness" + (kind === "warn" ? "" : " readiness--" + kind);
+    $("readiness-title").textContent = title;
+    $("readiness-text").textContent = text || "";
+    box.hidden = false;
+  }
+  function setServerStatus(kind, text) {
+    var pill = $("server-status");
+    pill.className = "server-status server-status--" + kind;
+    $("server-status-text").textContent = text;
+    pill.title = text;
+  }
+  function checkHealth() {
+    clearTimeout(healthTimer);
+    if (healthBusy) return;
+    healthBusy = true;
+    var ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    var killer = setTimeout(function () { if (ctrl) ctrl.abort(); }, HEALTH_TIMEOUT_MS);
+    fetch("/healthz", { headers: { Accept: "application/json" }, cache: "no-store", signal: ctrl ? ctrl.signal : undefined })
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (h) {
+        h = (h && typeof h === "object") ? h : {};
+        if (h.analyzer_ready === false) {
+          setServerStatus("warn", "Анализатор не готов");
+          var err = h.analyzer_error ? String(h.analyzer_error) : "модель ещё загружается";
+          setReadiness("warn", "Анализатор не готов", "Новые проверки начнутся после его запуска. Причина: " + err);
+        } else {
+          setServerStatus("ok", "Сервер работает");
+          if (h.vlm_ok === false) {
+            setReadiness("info", "Локальная VLM-модель недоступна",
+              "Проверки выполняются, но часть правил проверяется только детектором.");
+          } else {
+            setReadiness(null);
+          }
+        }
+      })
+      .catch(function () {
+        setServerStatus("down", "Нет связи с сервером");
+        setReadiness("down", "Сервер недоступен",
+          "Не удалось связаться с сервисом. Проверьте, что он запущен, — страница переподключится автоматически.");
+      })
+      .then(function () {
+        clearTimeout(killer);
+        healthBusy = false;
+        healthTimer = setTimeout(checkHealth, HEALTH_MS);
+      });
+  }
+  $("readiness-retry").addEventListener("click", checkHealth);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) checkHealth(); });
+
+  // ---------- Init ----------
+  renderFile();
+  show("upload");
+  route();
+  refreshHistory();
+  checkHealth();
+})();

@@ -1,0 +1,26 @@
+<section id="results" data-transition="fade" style="background:#F7F5F0;color:#14213D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:112px 128px 64px;display:flex;flex-direction:column;gap:40px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#B4581A;letter-spacing:2px">РЕЗУЛЬТАТЫ · 42 ОТКРЫТЫХ ВИДЕО</p>
+<h2 style="font-family:'PT Serif', Georgia, serif;font-size:72px;font-weight:700;line-height:1.1">Пропуск недопустим, лишнюю проверку отсечёт человек</h2>
+<div style="display:flex;gap:32px">
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:40px;border:1px solid #DCD8CE;border-radius:16px">
+<p style="font-family:'PT Serif', Georgia, serif;font-size:96px;font-weight:700;color:#B4581A">95%</p>
+<p style="font-size:28px;color:#3D4A63">полнота: 21 из 22 видео с нарушениями</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:40px;border:1px solid #DCD8CE;border-radius:16px">
+<p style="font-family:'PT Serif', Georgia, serif;font-size:96px;font-weight:700;color:#14213D">9/20</p>
+<p style="font-size:28px;color:#3D4A63">ложных на чистых: 4 — клиент без документа, 5 — подсказка «проверьте сейф»; на остальных 11 — 0</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:40px;border:1px solid #DCD8CE;border-radius:16px">
+<p style="font-family:'PT Serif', Georgia, serif;font-size:96px;font-weight:700;color:#14213D">86%</p>
+<p style="font-size:28px;color:#3D4A63">таймкод в пределах ±5 с; тип совпал в 86%</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:40px;border:1px solid #DCD8CE;border-radius:16px">
+<p style="font-family:'PT Serif', Georgia, serif;font-size:96px;font-weight:700;color:#14213D">27 с</p>
+<p style="font-size:28px;color:#3D4A63">на самое длинное видео (142 с): ~16 с загрузка + 10 с анализ; лимит 300 с</p>
+<p style="font-size:20px;color:#6A7183">RTX 5080, через публичный URL; 6 видео разом — 80 с</p>
+</div>
+</div>
+<p style="font-size:26px;line-height:1.4;color:#3D4A63"><b>Вне 42 роликов:</b> 134 сторонних клипа из 5 источников — открытый датасет MEVA, ролики с телефоном, перекрытая камера, сцены из открытых источников, синтетика; только для локальной проверки, не для обучения. На чужих сценах больше ложных и ошибок типа — это показано в документе 5.</p>
+<p style="margin-top:auto;font-size:24px;color:#6A7183">Прогон на целевой машине (RTX 5080), детектор 8540d83, 18.10 09:31. Перекодирование — 20/22, имитация новой камеры — 16/22. Разброс между одинаковыми прогонами — ±1 видео. Базовая линия «всегда нарушение»: точность 52%.</p>
+<aside>3:35–4:20. Итоговые числа: полнота 21/22 и ложные 9/20 (перекодирование 20/22) — сданный детектор 8540d83, прогон на целевой машине 18.10 09:31 (перекодирование — прогон на целевой машине 18.10 09:41: 20/22, ложных 11/20); таймкод ±5 с 86%, тип 86%, перекрёстная проверка 10/11 + 10/11 (ложных 1/10 и 5/10); имитация новой камеры 16/22 и сторонние ролики — 2a508df. Подсказка «проверьте сейф»: при уходе кассира из пустой комнаты с видимым сейфом всегда просим проверить сейф — ключ в замке занимает 3–5 пикселей; так находится X-22, но это не распознавание ключа; цена — 5 ложных (X-12/23/25/27/29). Пропущено только X-44 (T8). 4 из 9 ложных — X-19/35/37/39: по нашему разбору клиента обслуживают без документа (п.19 пп.1), по разметке организаторов — чистые; на остальных 11 чистых ложных нет. Разброс VLM между одинаковыми прогонами — до 2 вердиктов из 42. Время 27 с — замер X-14 на RTX 5080 через https://forte.incode.kz (67d1dbe + b360036, 08:05): 15–16 с загрузка, 9,9 с анализ; 6 видео разом — до 80 с. Ключевая фраза: «Организаторы сказали прямо: пропуск недопустим, ложное срабатывание допустимо — его отсечёт проверяющий. Мы настроили систему именно так.»</aside>
+</section>

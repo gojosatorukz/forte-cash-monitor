@@ -1,0 +1,17 @@
+<section id="roadmap" data-transition="fade" style="background:#F7F5F0;color:#14213D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:112px 128px;display:flex;flex-direction:column;gap:44px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#B4581A;letter-spacing:2px">ДАЛЬНЕЙШЕЕ РАЗВИТИЕ · В СДАННУЮ СИСТЕМУ НЕ ВХОДИТ</p>
+<h2 style="font-family:'PT Serif', Georgia, serif;font-size:72px;font-weight:700;line-height:1.1">Дальнейшее развитие</h2>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:28px 64px">
+<p style="font-size:32px;line-height:1.4"><b>Данные готовы:</b> 961 изображение Cashier и 297 клипов PIP/MEVA, 14 классов действий</p>
+<p style="font-size:32px;line-height:1.4"><b>Дообучить RT-DETRv2</b> (Apache-2.0) на Cashier после конвертации разметки в COCO</p>
+<p style="font-size:32px;line-height:1.4"><b>Предобучить распознавание действий</b> на 183 клипах PIP и 114 клипах MEVA</p>
+<p style="font-size:32px;line-height:1.4"><b>Решения проверяющих</b> из feedback.jsonl пополняют банковскую разметку</p>
+<p style="font-size:32px;line-height:1.4"><b>Проверять прирост</b> на отложенных банковских видео и новых ракурсах</p>
+<p style="font-size:32px;line-height:1.4"><b>Разрешение камер:</b> 1080p+ или отдельная камера на сейф</p>
+</div>
+<div style="margin-top:auto;border-top:1px solid #DCD8CE;padding-top:24px;display:flex;flex-direction:column;gap:6px">
+<p style="font-size:22px;color:#6A7183">Данные: CC BY 4.0 · Cashier — Tanishq; PIP — Visym Labs; MEVA — Kitware / IARPA.</p>
+<p style="font-size:22px;color:#6A7183">Подготовка: отбор, преобразование разметки, нарезка и перекодирование видео.</p>
+</div>
+<aside>Слайд подготовил Бекзат (HACK-244); обучение моделей не запускалось, прирост качества не измерен. Числа сверены с docs/external_training_dataset_README.md: 961 = 717 train + 148 val + 96 test; 11 исходных объектных классов Cashier. 297 = 257 train + 40 val; 183 PIP + 114 MEVA; длительность 25,1 минуты. 961 — подготовленная выборка, а не весь исходный Cashier (2 231 изображение). Не называть эти 14 действий «14 типами банковских нарушений». Не обещать доказанную устойчивость к новой камере: это цель будущей проверки. Разделение Cashier уменьшает утечку соседних кадров, но независимость сцен не доказана: исходных ID видео и людей нет. У MEVA люди могут повторяться по дням. Разрешение камер: на 464×848 ключ в замке и пломбы занимают 3–5 пикселей (документ 2, §2.7). Ссылки: RT-DETRv2 https://huggingface.co/PekingU/rtdetr_v2_r18vd (Apache-2.0); Cashier https://universe.roboflow.com/tanishq-kemla/cashier-activity-recognition-pmu4w ; PIP https://visym.github.io/collector/pip_175k/ ; MEVA https://mevadata.org/ ; CC BY 4.0 https://creativecommons.org/licenses/by/4.0/</aside>
+</section>

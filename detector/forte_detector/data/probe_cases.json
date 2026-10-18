@@ -1,0 +1,1241 @@
+[
+{
+"cue": "cash_on_desk",
+"vid": "X-26",
+"t": 16.0,
+"expected": true,
+"note": "banknote stack left on desk, room empty (C)"
+},
+{
+"cue": "cash_on_desk",
+"vid": "X-26",
+"t": 17.5,
+"expected": true,
+"note": "banknote stack left on desk, room empty (C)"
+},
+{
+"cue": "cash_on_desk",
+"vid": "X-26",
+"t": 19.0,
+"expected": true,
+"note": "banknote stack left on desk, room empty (C)"
+},
+{
+"cue": "cash_on_desk",
+"vid": "X-4",
+"t": 56.0,
+"expected": true,
+"note": "client-1 bundle on open desk as client 2 enters (A)"
+},
+{
+"cue": "cash_on_desk",
+"vid": "X-38",
+"t": 30.0,
+"expected": true,
+"note": "stack left on desk between clients (D)"
+},
+{
+"cue": "cash_on_desk",
+"vid": "X-38",
+"t": 33.0,
+"expected": true,
+"note": "stack left on desk between clients (D)"
+},
+{
+"cue": "cash_on_desk",
+"vid": "X-39",
+"t": 42.0,
+"expected": false,
+"note": "desk empty between clients (D)"
+},
+{
+"cue": "cash_on_desk",
+"vid": "X-44",
+"t": 5.0,
+"expected": false,
+"note": "mid-count: notes inside the counting machine, desk empty (D)"
+},
+{
+"cue": "cash_on_desk",
+"vid": "X-45",
+"t": 6.0,
+"expected": false,
+"note": "mid-count: machine counting, hands folded (D)"
+},
+{
+"cue": "cash_on_desk",
+"vid": "X-5",
+"t": 62.0,
+"expected": false,
+"note": "desk empty at next entry (A)"
+},
+{
+"cue": "cash_on_desk",
+"vid": "X-43",
+"t": 20.0,
+"expected": true,
+"note": "two piles on desk, cashier counting (D)"
+},
+{
+"cue": "cash_on_desk",
+"vid": "X-27",
+"t": 24.0,
+"expected": false,
+"note": "empty desk after cash went to safe (C)"
+},
+{
+"cue": "cash_on_desk",
+"vid": "X-27",
+"t": 25.0,
+"expected": false,
+"note": "empty desk after cash went to safe (C)"
+},
+{
+"cue": "cash_on_desk",
+"vid": "X-25",
+"t": 29.0,
+"expected": false,
+"note": "desk holds only fixed equipment (C)"
+},
+{
+"cue": "cash_on_desk",
+"vid": "X-29",
+"t": 15.0,
+"expected": false,
+"note": "empty room, laptop lock screen, no cash (C)"
+},
+{
+"cue": "cash_on_desk",
+"vid": "X-23",
+"t": 17.0,
+"expected": false,
+"note": "desk clear, room empty (B)"
+},
+{
+"cue": "bag_on_desk",
+"vid": "X-15",
+"t": 7.0,
+"expected": true,
+"note": "green cash bag flat on desk (B)"
+},
+{
+"cue": "bag_on_desk",
+"vid": "X-15",
+"t": 18.0,
+"expected": true,
+"note": "green cash bag flat on desk (B)"
+},
+{
+"cue": "bag_on_desk",
+"vid": "X-15",
+"t": 19.5,
+"expected": true,
+"note": "green cash bag flat on desk (B)"
+},
+{
+"cue": "bag_on_desk",
+"vid": "X-16",
+"t": 18.0,
+"expected": true,
+"note": "two green bags on desk (B)"
+},
+{
+"cue": "bag_on_desk",
+"vid": "X-23",
+"t": 17.0,
+"expected": false,
+"note": "desk clear (B)"
+},
+{
+"cue": "bag_on_desk",
+"vid": "X-27",
+"t": 25.0,
+"expected": false,
+"note": "desk clear (C)"
+},
+{
+"cue": "bag_on_desk",
+"vid": "X-40",
+"t": 1.0,
+"expected": false,
+"note": "desk clear, room empty (D)"
+},
+{
+"cue": "stamps_or_journal_on_desk",
+"vid": "X-24",
+"t": 12.0,
+"expected": true,
+"note": "dark tray + teal item left on desk (C)"
+},
+{
+"cue": "stamps_or_journal_on_desk",
+"vid": "X-24",
+"t": 13.5,
+"expected": true,
+"note": "dark tray + teal item left on desk (C)"
+},
+{
+"cue": "stamps_or_journal_on_desk",
+"vid": "X-24",
+"t": 3.0,
+"expected": true,
+"note": "black journal + 2 teal stamps on desk (C, orchestrator-verified)"
+},
+{
+"cue": "stamps_or_journal_on_desk",
+"vid": "X-29",
+"t": 15.0,
+"expected": false,
+"note": "empty room, fixed equipment only (C)"
+},
+{
+"cue": "stamps_or_journal_on_desk",
+"vid": "X-40",
+"t": 1.0,
+"expected": false,
+"note": "desk clear (D)"
+},
+{
+"cue": "stamps_or_journal_on_desk",
+"vid": "X-25",
+"t": 29.0,
+"expected": false,
+"note": "only fixed equipment after securing (C)"
+},
+{
+"cue": "stamps_or_journal_on_desk",
+"vid": "X-25",
+"t": 30.0,
+"expected": false,
+"note": "only fixed equipment after securing (C)"
+},
+{
+"cue": "stamps_or_journal_on_desk",
+"vid": "X-23",
+"t": 17.0,
+"expected": false,
+"note": "desk clear (B)"
+},
+{
+"cue": "screen_on_unlocked",
+"vid": "X-28",
+"t": 2.0,
+"expected": true,
+"note": "spreadsheet visible (C)"
+},
+{
+"cue": "screen_on_unlocked",
+"vid": "X-28",
+"t": 8.0,
+"expected": true,
+"note": "spreadsheet visible (C)"
+},
+{
+"cue": "screen_on_unlocked",
+"vid": "X-28",
+"t": 15.0,
+"expected": true,
+"note": "spreadsheet visible (C)"
+},
+{
+"cue": "screen_on_unlocked",
+"vid": "X-29",
+"t": 1.0,
+"expected": true,
+"note": "spreadsheet before locking (C)"
+},
+{
+"cue": "screen_on_unlocked",
+"vid": "X-29",
+"t": 8.0,
+"expected": false,
+"note": "lock screen wallpaper (C)"
+},
+{
+"cue": "screen_on_unlocked",
+"vid": "X-29",
+"t": 12.0,
+"expected": false,
+"note": "lock screen wallpaper (C)"
+},
+{
+"cue": "screen_on_unlocked",
+"vid": "X-29",
+"t": 16.0,
+"expected": false,
+"note": "lock screen wallpaper (C)"
+},
+{
+"cue": "screen_on_unlocked",
+"vid": "X-23",
+"t": 8.0,
+"expected": false,
+"note": "Windows lock screen (B)"
+},
+{
+"cue": "screen_on_unlocked",
+"vid": "X-23",
+"t": 16.0,
+"expected": false,
+"note": "Windows lock screen (B)"
+},
+{
+"cue": "screen_on_unlocked",
+"vid": "X-22",
+"t": 18.0,
+"expected": false,
+"note": "PC locked before leaving (B)"
+},
+{
+"cue": "screen_on_unlocked",
+"vid": "X-12",
+"t": 38.0,
+"expected": false,
+"note": "lid closed, lights off (A)"
+},
+{
+"cue": "screen_on_unlocked",
+"vid": "X-11",
+"t": 21.0,
+"expected": true,
+"note": "laptop left on and lit after exit, dark room (A)"
+},
+{
+"cue": "safe_open",
+"vid": "X-20",
+"t": 6.0,
+"expected": true,
+"note": "safe door wide open, cashier at desk (B)"
+},
+{
+"cue": "safe_open",
+"vid": "X-20",
+"t": 9.0,
+"expected": true,
+"note": "safe door wide open, cashier at desk (B)"
+},
+{
+"cue": "safe_open",
+"vid": "X-20",
+"t": 11.0,
+"expected": true,
+"note": "safe door wide open, cashier at desk (B)"
+},
+{
+"cue": "safe_open",
+"vid": "X-25",
+"t": 10.0,
+"expected": true,
+"note": "safe open 8-18 s (C)"
+},
+{
+"cue": "safe_open",
+"vid": "X-25",
+"t": 14.0,
+"expected": true,
+"note": "safe open 8-18 s (C)"
+},
+{
+"cue": "safe_open",
+"vid": "X-21",
+"t": 12.0,
+"expected": false,
+"note": "safe closed while counting (B)"
+},
+{
+"cue": "safe_open",
+"vid": "X-21",
+"t": 16.0,
+"expected": false,
+"note": "safe closed while counting (B)"
+},
+{
+"cue": "safe_open",
+"vid": "X-26",
+"t": 18.0,
+"expected": false,
+"note": "safe untouched, room empty (C)"
+},
+{
+"cue": "safe_open",
+"vid": "X-22",
+"t": 18.0,
+"expected": false,
+"note": "safe closed, room empty (B)"
+},
+{
+"cue": "safe_open",
+"vid": "X-25",
+"t": 29.0,
+"expected": false,
+"note": "safe closed and locked (C)"
+},
+{
+"cue": "key_in_safe",
+"vid": "X-22",
+"t": 15.0,
+"expected": true,
+"note": "key with light tag still in lock after exit (B)"
+},
+{
+"cue": "key_in_safe",
+"vid": "X-22",
+"t": 20.0,
+"expected": true,
+"note": "key with light tag still in lock after exit (B)"
+},
+{
+"cue": "key_in_safe",
+"vid": "X-23",
+"t": 1.0,
+"expected": true,
+"note": "key present at start (B)"
+},
+{
+"cue": "key_in_safe",
+"vid": "X-15",
+"t": 3.0,
+"expected": true,
+"note": "key in lock 0-8 s (B)"
+},
+{
+"cue": "key_in_safe",
+"vid": "X-23",
+"t": 13.0,
+"expected": false,
+"note": "empty keyhole after removal (B)"
+},
+{
+"cue": "key_in_safe",
+"vid": "X-23",
+"t": 18.0,
+"expected": false,
+"note": "empty keyhole after removal (B)"
+},
+{
+"cue": "key_in_safe",
+"vid": "X-15",
+"t": 17.0,
+"expected": false,
+"note": "key taken at 14 s+ (B)"
+},
+{
+"cue": "door_open",
+"vid": "X-32",
+"t": 10.0,
+"expected": true,
+"note": "door left ajar from 4.5 s (C)"
+},
+{
+"cue": "door_open",
+"vid": "X-32",
+"t": 15.0,
+"expected": true,
+"note": "door left ajar from 4.5 s (C)"
+},
+{
+"cue": "door_open",
+"vid": "X-32",
+"t": 20.0,
+"expected": true,
+"note": "door left ajar from 4.5 s (C)"
+},
+{
+"cue": "door_open",
+"vid": "X-30",
+"t": 8.0,
+"expected": true,
+"note": "door ajar 5-18 s (C)"
+},
+{
+"cue": "door_open",
+"vid": "X-30",
+"t": 11.0,
+"expected": true,
+"note": "door ajar 5-18 s (C)"
+},
+{
+"cue": "door_open",
+"vid": "X-33",
+"t": 7.0,
+"expected": true,
+"note": "door left ajar from ~5 s (C)"
+},
+{
+"cue": "door_open",
+"vid": "X-33",
+"t": 9.0,
+"expected": true,
+"note": "door left ajar from ~5 s (C)"
+},
+{
+"cue": "door_open",
+"vid": "X-32",
+"t": 0.0,
+"expected": false,
+"note": "closed at t=0 (C)"
+},
+{
+"cue": "door_open",
+"vid": "X-31",
+"t": 12.0,
+"expected": false,
+"note": "closed after 10 s (C)"
+},
+{
+"cue": "door_open",
+"vid": "X-31",
+"t": 18.0,
+"expected": false,
+"note": "closed after 10 s (C)"
+},
+{
+"cue": "door_open",
+"vid": "X-31",
+"t": 23.0,
+"expected": false,
+"note": "closed after 10 s (C)"
+},
+{
+"cue": "door_open",
+"vid": "X-26",
+"t": 3.0,
+"expected": false,
+"note": "cashier seated, door closed (C)"
+},
+{
+"cue": "door_open",
+"vid": "X-40",
+"t": 0.5,
+"expected": false,
+"note": "room empty, door closed (D)"
+},
+{
+"cue": "cup_or_food",
+"vid": "X-46",
+"t": 12.0,
+"expected": true,
+"note": "paper coffee cup / food pot at desk (D)"
+},
+{
+"cue": "cup_or_food",
+"vid": "X-46",
+"t": 14.0,
+"expected": true,
+"note": "paper coffee cup / food pot at desk (D)"
+},
+{
+"cue": "cup_or_food",
+"vid": "X-46",
+"t": 16.0,
+"expected": true,
+"note": "paper coffee cup / food pot at desk (D)"
+},
+{
+"cue": "cup_or_food",
+"vid": "X-46",
+"t": 18.0,
+"expected": true,
+"note": "paper coffee cup / food pot at desk (D)"
+},
+{
+"cue": "cup_or_food",
+"vid": "X-43",
+"t": 10.0,
+"expected": false,
+"note": "solo counting, no food (D)"
+},
+{
+"cue": "cup_or_food",
+"vid": "X-45",
+"t": 20.0,
+"expected": false,
+"note": "solo counting, no food (D)"
+},
+{
+"cue": "cup_or_food",
+"vid": "X-44",
+"t": 5.0,
+"expected": false,
+"note": "solo counting, no food (D)"
+},
+{
+"cue": "handbag_or_coat_on_desk",
+"vid": "X-40",
+"t": 10.0,
+"expected": true,
+"note": "handbag (and coat from 14 s) on desk (D)"
+},
+{
+"cue": "handbag_or_coat_on_desk",
+"vid": "X-40",
+"t": 18.0,
+"expected": true,
+"note": "handbag (and coat from 14 s) on desk (D)"
+},
+{
+"cue": "handbag_or_coat_on_desk",
+"vid": "X-40",
+"t": 20.0,
+"expected": true,
+"note": "handbag (and coat from 14 s) on desk (D)"
+},
+{
+"cue": "handbag_or_coat_on_desk",
+"vid": "X-40",
+"t": 23.0,
+"expected": true,
+"note": "handbag (and coat from 14 s) on desk (D)"
+},
+{
+"cue": "handbag_or_coat_on_desk",
+"vid": "X-43",
+"t": 10.0,
+"expected": false,
+"note": "no personal items (D)"
+},
+{
+"cue": "handbag_or_coat_on_desk",
+"vid": "X-45",
+"t": 10.0,
+"expected": false,
+"note": "no personal items (D)"
+},
+{
+"cue": "handbag_or_coat_on_desk",
+"vid": "X-44",
+"t": 10.0,
+"expected": false,
+"note": "no personal items (D)"
+},
+{
+"cue": "handbag_or_coat_on_desk",
+"vid": "X-40",
+"t": 1.0,
+"expected": false,
+"note": "desk clear before arrival (D)"
+},
+{
+"cue": "phone_visible",
+"vid": "X-8",
+"t": 10.0,
+"expected": false,
+"note": "desk phone only (A)"
+},
+{
+"cue": "phone_visible",
+"vid": "X-28",
+"t": 3.0,
+"expected": false,
+"note": "desk phone only (C)"
+},
+{
+"cue": "phone_visible",
+"vid": "X-43",
+"t": 10.0,
+"expected": false,
+"note": "desk phone only (D)"
+},
+{
+"cue": "id_document_shown",
+"vid": "X-1",
+"t": 5.0,
+"expected": true,
+"note": "client hands ID card (A)",
+"extra_ts": [
+4.5,
+6.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-3",
+"t": 8.0,
+"expected": true,
+"note": "cashier holds ID up 7-10 s (A)",
+"extra_ts": [
+7.0,
+9.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-16",
+"t": 9.0,
+"expected": true,
+"note": "collector hands white card 8.5-9 s (B)",
+"extra_ts": [
+8.5,
+10.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-18",
+"t": 20.0,
+"expected": true,
+"note": "2nd man hands white card (B)",
+"extra_ts": [
+19.5,
+21.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-2",
+"t": 9.0,
+"expected": false,
+"note": "cash on desk, no ID ever (A)",
+"extra_ts": [
+8.5,
+10.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-17",
+"t": 7.0,
+"expected": false,
+"note": "bag handover, no card (B)",
+"extra_ts": [
+6.5,
+8.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-34",
+"t": 7.0,
+"expected": false,
+"note": "banknotes handed over (D)",
+"extra_ts": [
+6.5,
+8.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-1",
+"t": 6.0,
+"expected": true,
+"note": "client hands ID, cashier looks it over (A)",
+"extra_ts": [
+5.5,
+6.5
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-4",
+"t": 12.0,
+"expected": true,
+"note": "client 1 hands over the ID (A)",
+"extra_ts": [
+11.5,
+13.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-4",
+"t": 61.0,
+"expected": true,
+"note": "client 2 hands over the ID (A)",
+"extra_ts": [
+60.0,
+62.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-5",
+"t": 10.0,
+"expected": true,
+"note": "ID handed over and checked (A)",
+"extra_ts": [
+9.0,
+11.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-19",
+"t": 7.0,
+"expected": false,
+"note": "banknotes handed over, no ID (B)",
+"extra_ts": [
+6.5,
+8.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-35",
+"t": 6.5,
+"expected": false,
+"note": "banknotes put on desk, no ID (D)",
+"extra_ts": [
+6.0,
+7.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-37",
+"t": 7.5,
+"expected": false,
+"note": "cash put on desk, no ID (D)",
+"extra_ts": [
+7.0,
+8.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-39",
+"t": 6.5,
+"expected": false,
+"note": "cash handed over, no ID (D)",
+"extra_ts": [
+6.0,
+7.0
+]
+},
+{
+"cue": "id_document_shown",
+"vid": "X-38",
+"t": 6.5,
+"expected": false,
+"note": "cash handed over, no ID (D)",
+"extra_ts": [
+6.0,
+7.0
+]
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-19",
+"t": 7.0,
+"expected": true,
+"note": "client hands over banknotes (B)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-35",
+"t": 6.5,
+"expected": true,
+"note": "client hands banknotes over the desk (D)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-37",
+"t": 7.5,
+"expected": true,
+"note": "client puts cash on desk from hand (D)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-39",
+"t": 6.5,
+"expected": true,
+"note": "client hands over cash (D)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-2",
+"t": 9.0,
+"expected": true,
+"note": "notes put down / cashier fans notes by hand (A)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-2",
+"t": 10.5,
+"expected": true,
+"note": "notes put down / cashier fans notes by hand (A)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-38",
+"t": 6.5,
+"expected": true,
+"note": "client hands over cash (D)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-1",
+"t": 10.0,
+"expected": true,
+"note": "notes passed hand to hand / hand count (A)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-1",
+"t": 12.0,
+"expected": true,
+"note": "notes passed hand to hand / hand count (A)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-1",
+"t": 5.5,
+"expected": false,
+"note": "client hands over the white ID card (A)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-4",
+"t": 12.0,
+"expected": false,
+"note": "client 1 hands over the ID (A)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-5",
+"t": 10.0,
+"expected": false,
+"note": "ID handed over and checked (A)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-3",
+"t": 8.0,
+"expected": false,
+"note": "cashier holds the ID up (A)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-16",
+"t": 9.0,
+"expected": false,
+"note": "collector hands a white card (B)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-28",
+"t": 3.0,
+"expected": false,
+"note": "typing on the laptop (C)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-22",
+"t": 2.0,
+"expected": false,
+"note": "typing on the laptop (B)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-29",
+"t": 15.0,
+"expected": false,
+"note": "empty room (C)"
+},
+{
+"cue": "counting_machine_used",
+"vid": "X-1",
+"t": 17.0,
+"expected": true,
+"note": "machine counts 16-19 s (A)",
+"extra_ts": [
+16.0,
+18.0
+]
+},
+{
+"cue": "counting_machine_used",
+"vid": "X-35",
+"t": 12.0,
+"expected": true,
+"note": "machine count 11-13 s (D)",
+"extra_ts": [
+11.0,
+13.0
+]
+},
+{
+"cue": "counting_machine_used",
+"vid": "X-37",
+"t": 12.0,
+"expected": true,
+"note": "machine count 11-14 s (D)",
+"extra_ts": [
+11.0,
+13.0
+]
+},
+{
+"cue": "counting_machine_used",
+"vid": "X-34",
+"t": 13.5,
+"expected": true,
+"note": "cashier feeds the machine 12.5-15 s (D)",
+"extra_ts": [
+13.0,
+14.5
+]
+},
+{
+"cue": "counting_machine_used",
+"vid": "X-28",
+"t": 3.0,
+"expected": false,
+"note": "typing on laptop (C)",
+"extra_ts": [
+2.0,
+4.0
+]
+},
+{
+"cue": "counting_machine_used",
+"vid": "X-13",
+"t": 43.0,
+"expected": false,
+"note": "gathers bundles, machine idle (A)",
+"extra_ts": [
+42.0,
+44.0
+]
+},
+{
+"cue": "counting_machine_used",
+"vid": "X-22",
+"t": 2.0,
+"expected": false,
+"note": "typing on laptop (B)",
+"extra_ts": [
+1.0,
+3.0
+]
+},
+{
+"cue": "cash_in_hand_to_body",
+"vid": "X-1",
+"t": 22.0,
+"expected": true,
+"note": "portion held low against left side (A)",
+"extra_ts": [
+21.5,
+22.5
+]
+},
+{
+"cue": "cash_in_hand_to_body",
+"vid": "X-2",
+"t": 13.0,
+"expected": true,
+"note": "left hand closed at lap (A)",
+"extra_ts": [
+12.5,
+14.0
+]
+},
+{
+"cue": "cash_in_hand_to_body",
+"vid": "X-2",
+"t": 15.0,
+"expected": true,
+"note": "hand to chest/neckline (A)",
+"extra_ts": [
+14.5,
+15.5
+]
+},
+{
+"cue": "cash_in_hand_to_body",
+"vid": "X-3",
+"t": 13.0,
+"expected": false,
+"note": "hand count above desk (A)",
+"extra_ts": [
+12.5,
+13.5
+]
+},
+{
+"cue": "cash_in_hand_to_body",
+"vid": "X-3",
+"t": 16.0,
+"expected": false,
+"note": "loads machine, free hand open (A)",
+"extra_ts": [
+15.5,
+17.0
+]
+},
+{
+"cue": "cash_in_hand_to_body",
+"vid": "X-10",
+"t": 12.0,
+"expected": false,
+"note": "counts on desk (A)",
+"extra_ts": [
+13.0,
+14.0
+]
+},
+{
+"cue": "person_count",
+"vid": "X-30",
+"t": 14.0,
+"expected": true,
+"note": "cashier + outsider (C)",
+"count": 2
+},
+{
+"cue": "person_count",
+"vid": "X-30",
+"t": 16.0,
+"expected": true,
+"note": "cashier + outsider (C)",
+"count": 2
+},
+{
+"cue": "person_count",
+"vid": "X-30",
+"t": 18.0,
+"expected": true,
+"note": "cashier + outsider (C)",
+"count": 2
+},
+{
+"cue": "person_count",
+"vid": "X-18",
+"t": 21.0,
+"expected": true,
+"note": "cashier + 2 visitors (B)",
+"count": 3
+},
+{
+"cue": "person_count",
+"vid": "X-16",
+"t": 21.0,
+"expected": true,
+"note": "cashier + seated collector (B)",
+"count": 2
+},
+{
+"cue": "person_count",
+"vid": "X-31",
+"t": 15.0,
+"expected": false,
+"note": "cashier alone (C)",
+"count": 1
+},
+{
+"cue": "person_count",
+"vid": "X-31",
+"t": 22.0,
+"expected": false,
+"note": "cashier alone (C)",
+"count": 1
+},
+{
+"cue": "person_count",
+"vid": "X-27",
+"t": 25.0,
+"expected": false,
+"note": "empty room (C)",
+"count": 0
+},
+{
+"cue": "person_count",
+"vid": "X-26",
+"t": 18.0,
+"expected": false,
+"note": "empty room (C)",
+"count": 0
+},
+{
+"cue": "person_count",
+"vid": "X-28",
+"t": 3.0,
+"expected": false,
+"note": "cashier alone (C)",
+"count": 1
+},
+{
+"cue": "person_count",
+"vid": "X-15",
+"t": 19.0,
+"expected": false,
+"note": "room empty; cashier visible outside beyond the glass (B)",
+"count": 0
+},
+{
+"cue": "person_count",
+"vid": "X-22",
+"t": 18.5,
+"expected": false,
+"note": "room empty; cashier outside the glass (B)",
+"count": 0
+},
+{
+"cue": "person_count",
+"vid": "X-11",
+"t": 21.5,
+"expected": false,
+"note": "room dark/empty; cashier visible outside through glass (A)",
+"count": 0
+},
+{
+"cue": "person_count",
+"vid": "X-34",
+"t": 1.5,
+"expected": false,
+"note": "cashier alone; passer-by behind the glass (D)",
+"count": 1
+},
+{
+"cue": "camera_blocked",
+"vid": "X-26",
+"t": 5.0,
+"expected": true,
+"note": "synthetic: 85% covered",
+"transform": "cover85"
+},
+{
+"cue": "camera_blocked",
+"vid": "X-8",
+"t": 10.0,
+"expected": true,
+"note": "synthetic: black frame",
+"transform": "black"
+},
+{
+"cue": "camera_blocked",
+"vid": "X-34",
+"t": 5.0,
+"expected": true,
+"note": "synthetic: 85% covered",
+"transform": "cover85"
+},
+{
+"cue": "camera_blocked",
+"vid": "X-11",
+"t": 20.0,
+"expected": false,
+"note": "lights off, scene visible (A)"
+},
+{
+"cue": "camera_blocked",
+"vid": "X-12",
+"t": 38.0,
+"expected": false,
+"note": "lights off, scene visible (A)"
+},
+{
+"cue": "camera_blocked",
+"vid": "X-26",
+"t": 5.0,
+"expected": false,
+"note": "normal frame (C)"
+},
+{
+"cue": "camera_blocked",
+"vid": "X-34",
+"t": 5.0,
+"expected": false,
+"note": "normal frame (D)"
+}
+]

@@ -1,0 +1,24 @@
+# Bare-metal service unit (Ubuntu). Install: see README, section "systemd".
+# Edit User=, Group=, WorkingDirectory=, EnvironmentFile= and PATH below to match the machine.
+[Unit]
+Description=ForteBank cash-room video check service (FastAPI, single process)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=forte
+Group=forte
+WorkingDirectory=/home/forte/forte-service
+# '-' = optional. run.sh also reads .env itself; values from here win (they are already in the environment).
+EnvironmentFile=-/home/forte/forte-service/.env
+# uv lives in ~/.local/bin, which is not on systemd's default PATH.
+Environment=PATH=/home/forte/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/forte/forte-service/run.sh
+Restart=always
+RestartSec=3
+# Give the in-flight job a moment to persist on stop.
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

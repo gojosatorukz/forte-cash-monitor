@@ -1,0 +1,33 @@
+<section id="pipeline" data-transition="fade" style="background:#F7F5F0;color:#14213D;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px;display:flex;flex-direction:column;gap:56px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#B4581A;letter-spacing:2px">КАК ЭТО РАБОТАЕТ</p>
+<h2 style="font-family:'PT Serif', Georgia, serif;font-size:72px;font-weight:700;line-height:1.1">Пять шагов от видео к карточке нарушения</h2>
+<div style="display:flex;gap:16px;align-items:stretch">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;padding:32px;border:1px solid #DCD8CE;border-radius:16px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#2F6FB5">1</p>
+<h3 style="font-size:32px;font-weight:600">Люди и трек</h3>
+<p style="font-size:24px;line-height:1.4;color:#3D4A63">RT-DETRv2 + ByteTrack, роли по поведению</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;padding:32px;border:1px solid #DCD8CE;border-radius:16px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#2F6FB5">2</p>
+<h3 style="font-size:32px;font-weight:600">Контрольные точки</h3>
+<p style="font-size:24px;line-height:1.4;color:#3D4A63">уход кассира, смена клиента, визит инкассатора</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;padding:32px;border:1px solid #DCD8CE;border-radius:16px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#2F6FB5">3</p>
+<h3 style="font-size:32px;font-weight:600">Состояние сцены</h3>
+<p style="font-size:24px;line-height:1.4;color:#3D4A63">деньги на столе? сейф? экран? дверь? — CV + локальная VLM</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;padding:32px;border:1px solid #DCD8CE;border-radius:16px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#2F6FB5">4</p>
+<h3 style="font-size:32px;font-weight:600">Движок правил</h3>
+<p style="font-size:24px;line-height:1.4;color:#3D4A63">типы T1…T15 и T99, интервал, кадры, две уверенности</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#14213D;padding:32px;border-radius:16px">
+<p style="font-family:'JetBrains Mono', 'Courier New', monospace;font-size:28px;color:#F2A65A">5</p>
+<h3 style="font-size:32px;font-weight:600;color:#F7F5F0">Справочник НПА</h3>
+<p style="font-size:24px;line-height:1.4;color:#C9D3E3">дословная цитата и пункт подставляются из rules.json</p>
+</div>
+</div>
+<p style="font-size:32px;line-height:1.4;color:#3D4A63;max-width:1500px">Зоны не задаются пикселями: место кассира и дверь выводятся из движения людей. В финале будет другой ракурс.</p>
+<aside>0:55–1:35. Пройти слева направо. Подчеркнуть: (1) зоны выводятся из данных, а не рисуются — это ответ на «другой ракурс в финале»; (2) VLM работает локально через llama.cpp; (3) VLM отвечает только на узкие вопросы «да/нет» по кадрам; тип выбирает движок правил, а цитату подставляет проверенный справочник.</aside>
+</section>
