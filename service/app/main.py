@@ -11,7 +11,7 @@ import shutil
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import unquote
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -21,11 +21,13 @@ from fastapi.staticfiles import StaticFiles
 from python_multipart.multipart import MultipartParseError, MultipartParser, parse_options_header
 from starlette.requests import ClientDisconnect
 
-from app.config import Settings
+from app.branding import BRANDED_PAGES, BrandedPages
+from app.clips import configure_parallel as configure_clip_parallel
+from app.config import API_KEY_NOT_CONFIGURED, MIN_API_KEY_LEN, Settings
 from app.health import VlmProbe
 from app.jobs import JobStore, new_job_id, sanitize_filename
-from app.review import MAX_BODY_BYTES, ReviewError, feedback_ndjson, merge_review
-from app.rules import display_path, load_rules_auto
+from app.review import CHECKLIST, MAX_BODY_BYTES, ReviewError, feedback_ndjson, merge_review
+from app.rules import load_rules_auto
 from app.ui_auth import UiGate
 from app.worker import Worker, clip_url
 
@@ -287,9 +289,12 @@ def public_url_info(settings: Settings) -> tuple[str | None, str | None]:
     return (url, "quick-tunnel") if url else (None, None)
 
 
-def create_app(settings: Settings | None = None, analyzer: Any = None) -> FastAPI:
-    """`analyzer`: optional ready instance (tests); otherwise loaded from settings.analyzer
-    once, in the worker thread at startup."""
+def create_app(settings: Settings | None = None, analyzer: Any = None,
+               analyzer_factory: Callable[[], Any] | None = None) -> FastAPI:
+    """`analyzer`: optional ready instance (tests; forces one job worker, an instance is never
+    shared between threads). `analyzer_factory`: optional callable (tests) giving each of the
+    JOB_WORKERS workers its own instance. Otherwise every worker loads settings.analyzer in its
+    own thread at startup, one after another."""
     _setup_logging()
     settings = settings or Settings.from_env()
     rules = load_rules_auto(settings.rules_path)
@@ -298,11 +303,12 @@ def create_app(settings: Settings | None = None, analyzer: Any = None) -> FastAP
     async def lifespan(app: FastAPI):
         settings.uploads_dir.mkdir(parents=True, exist_ok=True)
         store = JobStore(settings.jobs_dir)
-        worker = Worker(store, rules, settings, analyzer=analyzer)
+        configure_clip_parallel(settings.clip_max_parallel)
+        worker = Worker(store, rules, settings, analyzer=analyzer, analyzer_factory=analyzer_factory)
         app.state.store = store
         app.state.worker = worker
         worker.start()
-        for job_id in store.recover():
+        for job_id in store.recover():  # once, into the shared queue
             log.info("Re-queuing job %s left in processing state", job_id)
             worker.submit(job_id)
         yield
@@ -321,8 +327,15 @@ def create_app(settings: Settings | None = None, analyzer: Any = None) -> FastAP
         log.exception("Unhandled error on %s %s", request.method, request.url.path)
         return JSONResponse({"detail": "Внутренняя ошибка сервера (internal server error)"}, status_code=500)
 
+    if not settings.api_key_configured:
+        log.error("API_KEY is not set or shorter than %d characters: /api/v1/* answers 503 until it is set "
+                  "(UI and /healthz still work)", MIN_API_KEY_LEN)
+
     def require_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
-        if not x_api_key or not secrets.compare_digest(x_api_key.encode(), settings.api_key.encode()):
+        # Checked before the key comparison: an unconfigured key must not be probe-able.
+        if not settings.api_key_configured:
+            raise HTTPException(503, API_KEY_NOT_CONFIGURED)
+        if not x_api_key or not secrets.compare_digest(x_api_key.encode(), settings.api_key.strip().encode()):
             raise HTTPException(401, "Неверный или отсутствующий X-API-Key (invalid or missing API key)")
 
     def store_of(request: Request) -> JobStore:
@@ -402,14 +415,15 @@ def create_app(settings: Settings | None = None, analyzer: Any = None) -> FastAP
     @app.api_route("/healthz", methods=["GET", "HEAD"])
     def healthz(request: Request) -> dict[str, Any]:
         worker = request.app.state.worker
-        ready = worker.ready.is_set() and worker.analyzer is not None
+        workers = worker.status()
+        ready = workers["ready"] > 0  # at least one job worker has its analyzer loaded
         public_url, source = public_url_info(request.app.state.settings)
         probe = request.app.state.vlm_probe
         # vlm_ok is informational: `ok` stays "the service is up" (the analyzer can run without VLM).
-        return {"ok": True, "analyzer_ready": ready, "analyzer_error": worker.load_error,
+        return {"ok": True, "api_key_configured": settings.api_key_configured,
+                "analyzer_ready": ready, "analyzer_error": worker.load_error, "workers": workers,
                 "public_url": public_url, "public_url_source": source,
-                "rules_path": display_path(rules.path), "rules_count": len(rules),
-                "vlm_ok": probe.check(), "vlm_url": probe.url}
+                "rules_count": len(rules), "vlm_ok": probe.check(), "brand": settings.brand}
 
     # ----- public API -----
     @app.post("/api/v1/analyze", dependencies=[Depends(require_key)])
@@ -478,7 +492,8 @@ def create_app(settings: Settings | None = None, analyzer: Any = None) -> FastAP
 
     @app.api_route("/ui-api/rules", methods=["GET", "HEAD"])
     def ui_rules():
-        return {"rules": rules.public_dict()}
+        # `checklist`: reviewer-only steps the camera cannot verify (app/checklist.json).
+        return {"rules": rules.public_dict(), "checklist": CHECKLIST}
 
     # Without these, other methods on the upload routes would fall through to the static
     # mount and answer 404 instead of 405.
@@ -488,6 +503,19 @@ def create_app(settings: Settings | None = None, analyzer: Any = None) -> FastAP
         raise HTTPException(405, "Используйте POST (method not allowed, use POST)", headers={"Allow": "POST"})
 
     # ----- static UI (registered last so it never shadows the API) -----
+    # The HTML pages are branded server-side (BRAND, see app.branding) so the logo never flashes;
+    # the UiGate middleware still gates them like any other non-public path.
+    branded = BrandedPages(STATIC_DIR, settings.brand, settings.live_replay)
+
+    def branded_page(name: str) -> Callable[[], Response]:
+        def page() -> Response:
+            return Response(branded.get(name), media_type="text/html; charset=utf-8",
+                            headers={"Cache-Control": "no-cache"})
+        return page
+
+    for url_path, file_name in BRANDED_PAGES.items():
+        app.add_api_route(url_path, branded_page(file_name), methods=["GET", "HEAD"], include_in_schema=False)
+
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
     return app

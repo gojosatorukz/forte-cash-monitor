@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from app.config import DEFAULT_API_KEY, Settings
+from app.config import DEV_API_KEY, Settings
 from app.models import JobRecord, Violation
 
 
@@ -59,18 +59,18 @@ def test_settings_max_upload_mb_env(monkeypatch):
 
 
 def test_settings_from_env(monkeypatch, tmp_path):
-    for k in ("API_KEY", "DATA_DIR", "JOB_TIMEOUT_SEC", "ANALYZER", "STUB_DEBUG"):
+    for k in ("API_KEY", "API_KEY_DEV_DEFAULT", "DATA_DIR", "JOB_TIMEOUT_SEC", "ANALYZER", "STUB_DEBUG"):
         monkeypatch.delenv(k, raising=False)
     s = Settings.from_env()
-    assert s.api_key == DEFAULT_API_KEY and s.api_key_is_default
+    assert s.api_key == "" and not s.api_key_configured and not s.api_key_is_dev_default
     assert s.job_timeout_sec == 270.0
     assert s.analyzer == "app.analyzers.stub:StubAnalyzer"
-    monkeypatch.setenv("API_KEY", "k")
+    monkeypatch.setenv("API_KEY", "  real-key-0123456789  ")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("JOB_TIMEOUT_SEC", "2.5")
     monkeypatch.setenv("STUB_DEBUG", "1")
     s = Settings.from_env()
-    assert s.api_key == "k" and not s.api_key_is_default
+    assert s.api_key == "real-key-0123456789" and s.api_key_configured and not s.api_key_is_dev_default
     assert s.data_dir == tmp_path and s.jobs_dir == tmp_path / "jobs"
     assert s.job_timeout_sec == 2.5 and s.stub_debug
     assert s.max_upload_bytes == 200 * 1024 * 1024
@@ -131,3 +131,41 @@ def test_analysis_result_warnings_lenient():
 ])
 def test_violation_legal_strength(raw, expected):
     assert Violation(type="T1", timecode_sec=0, legal_strength=raw).legal_strength == expected
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", "short-key", " 15-chars-key-x "])
+def test_settings_api_key_unset_or_short_is_not_configured(monkeypatch, value):
+    monkeypatch.delenv("API_KEY_DEV_DEFAULT", raising=False)
+    if value is None:
+        monkeypatch.delenv("API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("API_KEY", value)
+    s = Settings.from_env()
+    assert not s.api_key_configured and s.api_key == "" and not s.api_key_is_dev_default
+
+
+def test_settings_api_key_min_length_boundary():
+    assert not Settings(api_key="x" * 15).api_key_configured
+    assert Settings(api_key="x" * 16).api_key_configured
+    assert not Settings(api_key="  " + "x" * 15 + "  ").api_key_configured
+    assert not Settings().api_key_configured  # no default key in code
+
+
+@pytest.mark.parametrize("value", [None, "", "short"])
+def test_settings_dev_default_flag(monkeypatch, caplog, value):
+    if value is None:
+        monkeypatch.delenv("API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("API_KEY", value)
+    monkeypatch.setenv("API_KEY_DEV_DEFAULT", "1")
+    with caplog.at_level("WARNING", logger="app.config"):
+        s = Settings.from_env()
+    assert s.api_key == DEV_API_KEY and s.api_key_configured and s.api_key_is_dev_default
+    assert any(r.levelname == "WARNING" and "API_KEY_DEV_DEFAULT" in r.getMessage() for r in caplog.records)
+
+
+def test_settings_real_key_beats_dev_flag(monkeypatch):
+    monkeypatch.setenv("API_KEY", "real-key-0123456789")
+    monkeypatch.setenv("API_KEY_DEV_DEFAULT", "1")
+    s = Settings.from_env()
+    assert s.api_key == "real-key-0123456789" and not s.api_key_is_dev_default

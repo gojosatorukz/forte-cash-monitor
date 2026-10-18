@@ -8,8 +8,12 @@ the evidence frames. Clips are written to a temp name, checked with ffprobe (at 
 video frame) and only then renamed, so a killed or broken encode never leaves a clip behind.
 
 The caller passes the deadline (the worker uses submit + JOB_HARD_CAP_SEC - 2 s). Clips are
-cut most-important-first (fact_conf / confidence, then timecode) with up to MAX_WORKERS
-parallel ffmpeg processes of FFMPEG_THREADS threads each.
+cut most-important-first (fact_conf / confidence, then timecode) with FFMPEG_THREADS threads per
+ffmpeg. Concurrency is bounded process-wide: every clip (ffmpeg + its ffprobe check) holds one
+slot of a semaphore of CLIP_MAX_PARALLEL (default 4) shared by all job workers' clip pools
+(`configure_parallel()` sets it at startup). Waiting for a slot counts against the clip's own
+job deadline: the acquire times out early enough that the clip could still be cut, and a clip
+that never got a slot is reported as skipped for time.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ import math
 import os
 import shutil
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -33,7 +38,7 @@ PAD_SEC = 2.0
 CLIP_MIN_SEC = 3.0
 CLIP_MAX_SEC = 8.0
 CLIP_HEIGHT = 480
-MAX_WORKERS = 4
+MAX_WORKERS = 4  # default CLIP_MAX_PARALLEL
 MIN_REMAINING_SEC = 2.0  # less than this left before the clip deadline -> skip all clips
 KILL_MARGIN_SEC = 1.0  # each ffmpeg's timeout = time to the clip deadline - this
 MIN_CLIP_TIMEOUT_SEC = 1.5  # don't start an ffmpeg whose timeout would be shorter
@@ -104,6 +109,24 @@ def video_filter(rotation_deg: int = 0) -> str:
 
 class ClipTimeout(RuntimeError):
     """Not enough time left before the clip deadline (skipped or killed)."""
+
+
+# Process-wide ffmpeg slots shared by every job worker's clip pool.
+_max_parallel = MAX_WORKERS
+_slots = threading.BoundedSemaphore(MAX_WORKERS)
+
+
+def configure_parallel(n: int) -> None:
+    """Set the process-wide clip concurrency (CLIP_MAX_PARALLEL). Call at startup, before any
+    clip is cut: clips already holding a slot of the previous semaphore keep it."""
+    global _max_parallel, _slots
+    n = max(1, int(n))
+    if n != _max_parallel:
+        _max_parallel, _slots = n, threading.BoundedSemaphore(n)
+
+
+def max_parallel() -> int:
+    return _max_parallel
 
 
 def _remaining(deadline: float) -> float:
@@ -210,6 +233,8 @@ def generate_clips(src: Path, violations: list[dict[str, Any]], out_dir: Path, d
         log.warning("Job %s: cannot create clip dir %s: %s", job_id, out_dir, e)
         return {}, [WARN_CLIPS_FAILED.format(nums=_nums(everything))]
 
+    slots = _slots  # one semaphore for the whole call, even if reconfigured meanwhile
+
     def one(n: int) -> str:
         """'ok' | 'time' | 'failed'"""
         v = violations[n - 1]
@@ -217,7 +242,14 @@ def generate_clips(src: Path, violations: list[dict[str, Any]], out_dir: Path, d
             win = clip_window(v.get("timecode_sec"), v.get("start_sec"), v.get("end_sec"), duration_sec)
             if win is None:
                 raise ValueError("no clip window")
-            cut_clip(src, out_dir / f"{n}.mp4", win[0], win[1], rotation_deg, deadline)
+            # Wait for a global ffmpeg slot only while a clip could still be started afterwards.
+            wait = _remaining(deadline) - KILL_MARGIN_SEC - MIN_CLIP_TIMEOUT_SEC
+            if wait < 0 or not slots.acquire(timeout=wait):
+                raise ClipTimeout("no free ffmpeg slot before the clip deadline")
+            try:
+                cut_clip(src, out_dir / f"{n}.mp4", win[0], win[1], rotation_deg, deadline)
+            finally:
+                slots.release()
             return "ok"
         except ClipTimeout as e:
             log.warning("Job %s: evidence clip %d not cut (time): %s", job_id, n, e)
@@ -229,7 +261,7 @@ def generate_clips(src: Path, violations: list[dict[str, Any]], out_dir: Path, d
     t0 = time.monotonic()
     outcome: dict[int, str] = {}
     try:
-        with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, n_total), thread_name_prefix="clip") as pool:
+        with ThreadPoolExecutor(max_workers=min(_max_parallel, n_total), thread_name_prefix="clip") as pool:
             # Submission order = start order: the most important clips are cut first.
             futs = {n: pool.submit(one, n) for n in clip_order(violations)}
             for n, fut in futs.items():

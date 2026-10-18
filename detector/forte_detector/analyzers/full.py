@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from forte_detector.analyzers.perception_only import _variant_name
+from forte_detector.concurrency import atomic_write_text
 from forte_detector.perception.pipeline import perceive
 from forte_detector.probes.base import ProbeRequest, ProbeResult
 from forte_detector.rules import engine
@@ -102,7 +103,7 @@ class _ProbeDiskCache:
     def save_calibration(self, cal: dict) -> None:
         if self.enabled and not (cal.get("meta") or {}).get("error"):
             self.cal_path.parent.mkdir(parents=True, exist_ok=True)
-            self.cal_path.write_text(self._json.dumps(cal))
+            atomic_write_text(self.cal_path, self._json.dumps(cal))
 
     @staticmethod
     def _spec_hash(cue: str) -> str:
@@ -137,7 +138,7 @@ class _ProbeDiskCache:
     def save(self) -> None:
         if self.enabled and self.data:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(self._json.dumps(self.data, ensure_ascii=False))
+            atomic_write_text(self.path, self._json.dumps(self.data, ensure_ascii=False))
 
 
 def effective_frame_transform(timeline: dict, transform: Transform | None):
@@ -415,6 +416,12 @@ def analyze(
         prog(0.45 + 0.5 * i / n_items, f"probes: {item.rule.name}")
         if not fits(item.requests):
             probe_log.append({"rule": item.rule.name, "skipped": "vlm_cap"})
+            if getattr(item.rule, "can_decide_unprobed", False):
+                try:
+                    for e in item.rule.decide(ctx, []):
+                        acc.add(e)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("rule %s failed: %s", item.rule.name, e)
             continue
         reqs = list(item.requests)
         run_reqs(reqs)

@@ -282,3 +282,24 @@ def test_zero_violation_job_has_no_clip_warning(tmp_path, test_video):
         body = wait_done(c, upload(c, test_video).json()["job_id"], route="/api/v1/jobs/", timeout=30)
         assert body["status"] == "done" and body["violations"] == []
         assert not [w for w in body["warnings"] if "клип" in w]
+
+
+def test_global_slot_wait_counts_against_the_clip_deadline(tmp_path, test_video, monkeypatch):
+    """All ffmpeg slots busy (another job): the clip waits only while it could still be cut,
+    then is reported as skipped for time - never past the deadline."""
+    called = []
+    monkeypatch.setattr(clips, "cut_clip", lambda *a, **k: called.append(a))
+    clips.configure_parallel(1)
+    try:
+        assert clips._slots.acquire(timeout=1)  # held by "another job"
+        try:
+            deadline = time.monotonic() + 4.0
+            vs = [{"timecode_sec": 1.0}, {"timecode_sec": 2.0}]
+            made, notes = generate_clips(test_video, vs, tmp_path / "c", deadline, duration_sec=3.0)
+            assert time.monotonic() <= deadline
+        finally:
+            clips._slots.release()
+        assert made == {} and called == []
+        assert notes == [WARN_CLIPS_TIME.format(nums="1, 2")]
+    finally:
+        clips.configure_parallel(clips.MAX_WORKERS)

@@ -296,6 +296,7 @@ def test_client_seated_at_desk_until_the_end_is_not_outside():
 
 def test_exit_without_any_door_evidence_via_frame_edge():
     # the cashier is the only track; the door is at the frame edge and she stays visible behind it
+    # at a similar size: the frame-edge cue (cashier only) still gives the exit
     edge_door = [0.0, 0.15, 0.12, 0.45]
     cashier = _track(1, _seg(0, 8, SEAT), _seg(8, 12, SEAT, edge_door), _seg(12, 16, edge_door, STAND_GLASS),
                      _seg(16, 20, STAND_GLASS))
@@ -303,6 +304,76 @@ def test_exit_without_any_door_evidence_via_frame_edge():
     exits = _cps(tl, "cashier_exits_room")
     assert len(exits) == 1 and abs(exits[0]["t"] - 12.0) <= 0.5
     assert len(_cps(tl, "room_empty_start")) == 1
+
+
+def test_frame_edge_alone_is_not_exit_evidence_for_a_visitor():
+    # X-2 pattern: a person seated at the right frame border (box cut by the edge) for the whole clip,
+    # leaning towards the cashier once; no glass/door evidence -> never "outside", always counted
+    edge = [0.80, 0.35, 1.0, 0.75]
+    lean = [0.62, 0.40, 0.80, 0.75]
+    cashier = _track(1, _seg(0, 20, SEAT))
+    person = _track(2, _seg(0, 4, edge), _seg(4, 6, edge, lean), _seg(6, 8, lean, edge), _seg(8, 20, edge))
+    tl = _build([cashier, person], 20.0)
+    assert tl["roles"]["visitor_tracks"] == [2]
+    assert tl["outside"] == []
+    assert tl["series"]["n_persons"][tl["series"]["t"].index(18.0)] == 2
+
+
+def _scored(tr, score):
+    tr.scores = [score] * len(tr.t)
+    return tr
+
+
+def test_stationary_high_score_person_far_from_seat_is_counted():
+    # unfamiliar camera: a person stands still the whole clip far from the (detected) seat, person-
+    # sized and detected strongly (e.g. a clerk behind the counter while a robber holds the seat)
+    cashier = _track(1, _seg(0, 20, SEAT))
+    clerk = _scored(_track(2, _seg(0, 20, [0.75, 0.40, 0.98, 0.75])), 0.85)
+    tl = _build([cashier, clerk], 20.0)
+    assert tl["roles"]["visitor_tracks"] == [2] and tl["roles"]["background_tracks"] == []
+    assert max(tl["series"]["n_persons"]) == 2
+
+
+def test_stationary_high_score_person_next_to_seat_is_counted():
+    # a man standing still behind the counter right next to the seated cashier, strong detection
+    cashier = _track(1, _seg(0, 20, SEAT))
+    man = _scored(_track(2, _seg(0, 20, [0.58, 0.35, 0.74, 0.72])), 0.8)
+    tl = _build([cashier, man], 20.0)
+    assert tl["roles"]["visitor_tracks"] == [2]
+    assert min(tl["series"]["n_persons"]) == 2
+
+
+def test_static_low_score_box_is_background():
+    # a coat on a chair / poster: never moves, constant size, weak detection, person-sized
+    cashier = _track(1, _seg(0, 20, SEAT))
+    poster = _scored(_track(2, _seg(0, 20, [0.62, 0.40, 0.75, 0.68])), 0.35)
+    tl = _build([cashier, poster], 20.0)
+    assert tl["roles"]["background_tracks"] == [2]
+    assert tl["background_reasons"] == {"2": "low_score"}
+    assert max(tl["series"]["n_persons"]) == 1
+
+
+def test_far_small_person_is_background_with_scale_reason():
+    # behind the glass: far from the seat and clearly smaller than the cashier, even if detected well
+    cashier = _track(1, _seg(0, 20, SEAT))
+    outside = _scored(_track(2, _seg(2, 18, [0.85, 0.05, 0.93, 0.25], [0.80, 0.05, 0.88, 0.25])), 0.9)
+    tl = _build([cashier, outside], 20.0)
+    assert tl["roles"]["background_tracks"] == [2]
+    assert tl["background_reasons"]["2"] in ("small", "far_small")
+
+
+def test_duplicate_box_on_the_same_person_is_not_door_evidence():
+    # a client comes to the desk and goes back to where she came from, staying there (in the room); a
+    # second (part) box of the same client appears/disappears on top of her: its birth must not be
+    # door evidence that makes her "leave through a door"
+    right = [0.70, 0.30, 0.95, 0.70]
+    cashier = _track(1, _seg(0, 20, SEAT))
+    client = _track(2, _seg(0, 3, right, DESK_FRONT), _seg(3, 7, DESK_FRONT), _seg(7, 10, DESK_FRONT, right),
+                    _seg(10, 20, right))
+    part = _track(3, _seg(12, 17, [0.72, 0.32, 0.90, 0.60]))
+    tl = _build([cashier, client, part], 20.0)
+    assert all(o["track_id"] != 2 for o in tl["outside"])
+    assert tl["series"]["n_persons"][tl["series"]["t"].index(19.0)] == 2
 
 
 def test_exit_without_any_door_evidence_via_scale_drop():
@@ -382,8 +453,39 @@ def test_cashier_reentering_as_a_new_track_is_door_evidence_for_her_exit():
     assert tl["roles"]["cashier_tracks"] == [1, 2]
     exits = _cps(tl, "cashier_exits_room")
     assert len(exits) == 1 and abs(exits[0]["t"] - 12.0) <= 0.5 and exits[0].get("seen_behind_glass")
-    assert [o["track_id"] for o in tl["outside"]] == [1]
+    assert 1 in [o["track_id"] for o in tl["outside"]]
     enters = _cps(tl, "cashier_enters_room")
     assert len(enters) == 1 and abs(enters[0]["t"] - 19.0) <= 0.5
     s = tl["series"]
     assert s["cashier_present"][s["t"].index(24.0)] is True
+
+
+def test_low_score_ghost_with_rare_strong_spikes_is_background():
+    # a coat on a chair (median 0.4) that spikes >= 0.7 on ~3% of a long clip, in scattered samples:
+    # > 2 s in total, but neither 2 s consecutive nor >= 20% of the track -> still background
+    cashier = _track(1, _seg(0, 120, SEAT))
+    ghost = _track(2, _seg(0, 120, [0.62, 0.40, 0.75, 0.68]))
+    ghost.scores = [0.85 if i % 30 == 0 else 0.4 for i in range(len(ghost.t))]
+    tl = _build([cashier, ghost], 120.0)
+    assert tl["background_reasons"] == {"2": "low_score"}
+
+
+def test_varying_score_person_with_a_strong_stretch_is_counted():
+    # a real person detected weakly most of the time (median < 0.5) but strongly for 3 s in a row
+    cashier = _track(1, _seg(0, 20, SEAT))
+    person = _track(2, _seg(0, 20, [0.62, 0.30, 0.80, 0.72]))
+    person.scores = [0.8 if 20 <= i < 32 else 0.4 for i in range(len(person.t))]
+    tl = _build([cashier, person], 20.0)
+    assert tl["roles"]["visitor_tracks"] == [2]
+
+
+def test_different_nearby_person_is_still_door_evidence():
+    # another person standing at the door while the cashier crosses it (partly overlapping, but not a
+    # duplicate of her) is kept as door evidence; she has no evidence-free cue (same size, inside
+    # the frame, same score)
+    cashier = _track(1, _seg(0, 8, SEAT), _seg(8, 12, SEAT, DOOR), _seg(12, 16, DOOR, STAND_GLASS),
+                     _seg(16, 20, STAND_GLASS))
+    other = _track(9, _seg(10, 20, [0.08, 0.12, 0.18, 0.42]))
+    tl = _build([cashier, other], 20.0)
+    assert 1 in [o["track_id"] for o in tl["outside"]]
+    assert len(_cps(tl, "cashier_exits_room")) == 1

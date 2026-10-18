@@ -23,8 +23,8 @@ class ProbeResult:
 
 CUES = ("cash_on_desk", "bag_on_desk", "stamps_or_journal_on_desk", "safe_open", "key_in_safe",
         "screen_on_unlocked", "door_open", "cup_or_food", "handbag_or_coat_on_desk",
-        "phone_visible", "camera_blocked", "counting_machine_used", "id_document_shown",
-        "person_count", "cash_in_hand_to_body")
+        "phone_visible", "phone_held", "phone_on_desk", "camera_blocked", "counting_machine_used", "id_document_shown",
+        "person_count", "cash_in_hand_to_body", "banknotes_in_hand")
 
 class ProbeRunner(Protocol):
     def __call__(self, video_path: str, requests: list[ProbeRequest], *,

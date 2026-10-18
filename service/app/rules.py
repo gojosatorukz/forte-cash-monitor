@@ -155,6 +155,52 @@ def render_template(template: str, t: float, obs: str | None = None) -> str:
     return clean_text(_PLACEHOLDER_RE.sub(sub, template))
 
 
+# ---------- citation grounding ----------
+
+_PAREN_RE = re.compile(r"\(([^()]*)\)")
+
+
+def short_doc_name(document: str) -> str:
+    """A parenthesized part starting with «Постановление» (the act's number/date) if present,
+    else the full document string."""
+    doc = " ".join((document or "").split())
+    for m in _PAREN_RE.finditer(doc):
+        inner = m.group(1).strip()
+        if inner.startswith("Постановление"):
+            return inner
+    return doc
+
+
+def grounding_sentence(citations: list[dict[str, Any]]) -> str:
+    """«Основание: <doc>, <point>; <point>; <doc2>, <point>.» — consecutive citations of the same
+    document share one doc name; empty points are skipped. "" when nothing to cite."""
+    parts: list[str] = []
+    prev_doc: str | None = None
+    for c in citations:
+        doc = short_doc_name(str(c.get("document") or "")).rstrip(" .")
+        point = " ".join(str(c.get("point") or "").split()).rstrip(" .")
+        if not doc and not point:
+            continue
+        if doc and doc != prev_doc:
+            parts.append(f"{doc}, {point}" if point else doc)
+            prev_doc = doc
+        elif point:
+            parts.append(point)
+    if not parts:
+        return ""
+    return "Основание: " + "; ".join(parts) + "."
+
+
+def append_grounding(description: str, citations: list[dict[str, Any]]) -> str:
+    sentence = grounding_sentence(citations)
+    if not sentence:
+        return description
+    base = description.strip()
+    if base and base[-1] not in ".!?…":
+        base += "."
+    return f"{base} {sentence}" if base else sentence
+
+
 # ---------- knowledge base ----------
 
 class RulesKB:
@@ -208,12 +254,13 @@ class RulesKB:
             "fact_conf": v.fact_conf,
             "legal_conf": v.legal_conf,
             "legal_strength": v.legal_strength,
-            "description": description,
+            "description": append_grounding(description, citations),
+            "description_text": description,
             "rule": citations[0] if citations else None,
             "rules": citations,
             "evidence_frames": [f.model_dump() for f in v.evidence_frames],
         }
-        if analyzer_text and analyzer_text != description:
+        if analyzer_text and analyzer_text != description:  # vs the pre-grounding text
             out["analyzer_description"] = analyzer_text  # kept so it isn't lost; the UI ignores it
         return out
 

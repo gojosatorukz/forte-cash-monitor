@@ -121,7 +121,7 @@ Environment:
 | `FORTE_DET_MODEL` | `PekingU/rtdetr_v2_r18vd` | person detector checkpoint (prod may use `PekingU/rtdetr_v2_r50vd`) |
 | `FORTE_DEVICE` | auto (cuda if available) | person detector device |
 | `FORTE_OV_MODEL` / `FORTE_OV_DEVICE` | `google/owlv2-base-patch16-ensemble` / `auto` | calibration model; device `cpu`, `cuda` or `auto` (cuda if ≥1.5 GB free at warm-up; a later CUDA OOM falls back to CPU) |
-| `FORTE_PROBE_BUDGET_S`, `FORTE_VLM_MAX_SIDE`, `FORTE_VERDICT_THR` | 150, 896, 0.4 | probe budget, VLM image size, verdict threshold |
+| `FORTE_PROBE_BUDGET_S`, `FORTE_VLM_MAX_SIDE`, `FORTE_VERDICT_THR` | 150, 896, 0.25 | probe budget, VLM image size, verdict threshold (recall-first: weak evidence emits low-fact_conf events above it) |
 | `FORTE_EVAL_CACHE`, `FORTE_CACHE_DIR` | off, `cache/` | eval-only caches. **Leave them unset in production.** |
 | `FORTE_ALLOW_DOWNLOAD` | unset (offline) | `import forte_detector` sets `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1` (unless already set) and loads weights with `local_files_only`; `1` allows downloads (only `scripts/fetch_models.py` needs it) |
 

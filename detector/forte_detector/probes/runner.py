@@ -30,6 +30,7 @@ from __future__ import annotations
 import bisect
 import logging
 import os
+import threading
 import time
 from typing import Any, Callable
 
@@ -67,13 +68,16 @@ DOOR_GAP_SCAN = 32  # max frames read inside the gap to narrow it down
 # doorway, not the padded ROI, which also spans the glass panels a person may stand behind)
 DOOR_ZONE_PRESENCE = 0.5
 
-_CLIENT: VLMClient | None = None  # the HTTP client only (no per-video state besides the down-flag)
+_CLIENT: VLMClient | None = None  # the HTTP client only (per-job state is thread-local inside it)
+_CLIENT_LOCK = threading.Lock()
 
 
 def get_client() -> VLMClient:
     global _CLIENT
     if _CLIENT is None:
-        _CLIENT = VLMClient()
+        with _CLIENT_LOCK:  # double-checked: concurrent analyze() threads share one client
+            if _CLIENT is None:
+                _CLIENT = VLMClient()
     return _CLIENT
 
 
@@ -362,6 +366,24 @@ def plausible_machine(lap, cm) -> bool:
     return _gap(lap, cm) < 2.5 * lw and 0.15 <= ratio <= 3.0  # opposite desk ends: ~1.5-2.1 lw (X-38, X-16, X-4)
 
 
+def hands_roi(timeline: dict, t: float):
+    """Hand-over area at t: the box spanning the visitor(s) and the cashier in the nearest timeline
+    sample (a hand-over happens between them), or the visitor alone; None without a visitor."""
+    ser = timeline.get("series") or {}
+    ts = ser.get("t") or []
+    if not ts:
+        return None
+    i = int(np.argmin([abs(x - t) for x in ts]))
+    if abs(ts[i] - t) > 1.0:
+        return None
+    rows = (ser.get("persons") or [[]] * len(ts))[i]
+    vis = [p[2] for p in rows if len(p) > 2 and p[1] != "cashier"]
+    if not vis:
+        return None
+    boxes = vis + [p[2] for p in rows if len(p) > 2 and p[1] == "cashier"]
+    return [min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)]
+
+
 def _coco_laptop_video(timeline: dict):
     """Median box of strong COCO laptop detections over the whole video (None if < 3)."""
     ser = timeline.get("series") or {}
@@ -427,7 +449,9 @@ def door_roi(zone, door_points: int | None, ov_door, seat) -> tuple[list[float] 
        handle -> a person-sized pseudo zone centred on it (size of the seat box, the cashier's
        box) -> door_roi_from_zone. Padding the handle box itself gives a ~0.03-high strip that
        misses the door leaf (X-32 after perception rounds 4-5: no door zone, ROI 0.03 high).
-    3. doorway zone from 1-2 points; 4. None.
+    3. None = door absent. A doorway zone from only 1-2 births/deaths is NOT used on its own: on an
+       external top-down table clip (ext12) two track ends at the frame corner made a phantom door
+       [0, 0, 0.44, 0.47] and the door probe then "saw" it open (T5).
     Any result thinner than DOOR_ROI_MIN_H is rebuilt as a person-sized pseudo zone around its centre.
     """
     def person_zone(c):
@@ -449,8 +473,6 @@ def door_roi(zone, door_points: int | None, ov_door, seat) -> tuple[list[float] 
             roi, src = [cx - half, ov_door[1], cx + half, ov_door[3]], "openvocab"
         else:
             roi, src = cheap.door_roi_from_zone(person_zone(centre(ov_door))), "openvocab_handle"
-    elif zone:
-        roi, src = cheap.door_roi_from_zone(zone), "timeline_weak"
     else:
         return None, None
     if roi[3] - roi[1] < DOOR_ROI_MIN_H:
@@ -497,7 +519,7 @@ def pick_leaf_side(read, timeline, roi, handle) -> tuple[list[float], str]:
     return ([round(v, 4) for v in left], "left") if al > ar else ([round(v, 4) for v in right], "right")
 
 
-DOOR_ROI_VERSION = 3  # bump when the door ROI chain changes: older calibrations get it recomputed
+DOOR_ROI_VERSION = 5  # bump when the door ROI chain changes: older calibrations get it recomputed
 
 
 def select_door_roi(read, timeline: dict, ov_door) -> tuple[list[float] | None, str | None, str | None]:
@@ -517,6 +539,42 @@ def select_door_roi(read, timeline: dict, ov_door) -> tuple[list[float] | None, 
 # ----------------------------------------------------------------------------- calibration
 
 
+# Zone presence thresholds on the open-vocab score (OWLv2). Training clips (42 open videos, PC run
+# cc70a19): min safe 0.22, laptop 0.33, counting machine 0.165, door 0.165, desk 0.41.
+ZONE_MIN_SCORE = {"safe": 0.2, "laptop": 0.3, "counting_machine": 0.15, "door": 0.15, "desk": 0.3}
+ABSENT_ZONES = ("door", "safe", "laptop")  # desk: None = full frame, never "absent"
+ZONE_OF_CUE = {"safe_open": "safe", "key_in_safe": "safe", "screen_on_unlocked": "laptop"}
+ZONE_NAMES_RU = {"door": "дверь", "safe": "сейф", "laptop": "ноутбук/экран", "desk": "рабочий стол"}
+
+
+def room_gate(read, timeline: dict) -> bool | None:
+    """Room view (True) vs close-up of a table/objects (False), asked on up to 2 low-occupancy frames.
+    False only when confident: one "no" at conf >= 0.8 or two frames agreeing on "no", and no
+    confident "yes". None = no usable answer (VLM down/unsure): never treated as close-up."""
+    try:
+        ts = openvocab.pick_frames(timeline, 2)
+        ans = [get_client().yesno([_full(read(t))], questions.DOOR_GATE_PROMPT)[:2] for t in ts]
+    except Exception as e:  # noqa: BLE001
+        log.warning("room gate failed: %s", e)
+        return None
+    dec = [(v, c) for v, c in ans if v is not None]
+    if not dec:
+        return None
+    if any(v and c >= 0.8 for v, c in dec):
+        return True
+    nos = [c for v, c in dec if v is False]
+    if nos and (len(nos) >= 2 or max(nos) >= 0.8) and not any(v for v, _ in dec):
+        return False
+    return True if all(v for v, _ in dec) else None
+
+
+def absent_note_ru(absent: list) -> str:
+    if not absent:
+        return ""
+    names = ", ".join(ZONE_NAMES_RU[z] for z in absent)
+    return ("зона не найдена: " if len(absent) == 1 else "зоны не найдены: ") + names
+
+
 def calibrate(video_path: str, timeline: dict, transform: Callable[[Any], Any] | None = None,
               detector=None) -> dict:
     """Open-vocab zones on <= 3 low-occupancy frames + the door ROI and its closed reference.
@@ -532,16 +590,46 @@ def calibrate(video_path: str, timeline: dict, transform: Callable[[Any], Any] |
         log.warning("calibration failed for %s: %s", video_path, e)
         cal = {**{q: None for q in openvocab.QUERIES}, "scores": {q: None for q in openvocab.QUERIES},
                "meta": {"error": f"{type(e).__name__}: {e}"}}
+    ov_failed = bool((cal.get("meta") or {}).get("error"))
+    # room-view gate (one cheap VLM question, <= 2 frames): a confident "close-up" is the second signal
+    # needed before any zone is declared absent; None = no answer (VLM down / unsure) = not close-up
+    gate = None if ov_failed else room_gate(read, timeline)
+    cal["meta"]["room_gate"] = gate
+    close_up = gate is False
+    # explicit "object absent" needs a low score PLUS a second signal: no box at all, or a box under
+    # the zone threshold while the gate says close-up. Weak boxes are KEPT (recall first) and flagged.
+    scores = cal.get("scores") or {}
+    cal["weak"] = []
+    for k, thr in ZONE_MIN_SCORE.items():
+        if cal.get(k) is not None and scores.get(k) is not None and scores[k] < thr:
+            if close_up:
+                cal[k] = None
+            else:
+                cal["weak"].append(k)
     # door ROI = what the door_open probe uses: doorway zone from tracks first (open-vocab "glass
     # door" often picks the fixed glass panel), open-vocab box only as a fallback
     ov_door = cal.get("door")
     cal["door_openvocab"] = ov_door
     cal["door"], cal["meta"]["door_source"], cal["meta"]["door_leaf_side"] = select_door_roi(read, timeline, ov_door)
     cal["meta"]["door_roi_version"] = DOOR_ROI_VERSION
+    if cal["door"] is not None and close_up:
+        cal["door"], cal["meta"]["door_source"] = None, "vlm_close_up"
+    if cal.get("laptop") is None:  # evidence-based fallback: strong COCO laptop detections
+        cl = _coco_laptop_video(timeline)
+        if cl is not None:
+            cal["laptop"] = [round(v, 4) for v in cl]
+            cal["meta"]["laptop_source"] = "coco"
     cal["desk_openvocab"] = cal.get("desk")
     seat = (timeline.get("zones") or {}).get("seat")
-    cal["desk"], cal["meta"]["desk_source"] = desk_roi(
+    cal["desk"], cal["meta"]["desk_source"] = desk_roi(  # None = use the full frame (not "no desk")
         cal.get("laptop"), cal.get("counting_machine"), _coco_laptop_video(timeline), cal["desk_openvocab"], seat)
+    # open-vocab itself failed (OOM, missing model, bad frame): nothing is known to be absent ->
+    # cues keep their full-frame fallback
+    # door: no ROI = absent (cannot be probed; that is what kills the phantom T5). safe/laptop: absent
+    # only with the close-up gate too - with no box in a room view the cues keep the full-frame VLM
+    cal["absent"] = [] if ov_failed else [z for z in ABSENT_ZONES
+                                          if cal.get(z) is None and (z == "door" or close_up)]
+    cal["absent_note_ru"] = absent_note_ru(cal["absent"])
     cal["door_ref"] = None
     if cal.get("door"):
         try:
@@ -622,17 +710,27 @@ class _Ctx:
             self._cal = self.timeline.get("calibration") or calibrate(self.video_path, self.timeline, self.transform)
         return self._cal
 
+    @property
+    def absent(self) -> list:
+        """Zones calibration positively found absent (only from a real calibrate() result)."""
+        cal = self.cal or {}
+        if (cal.get("meta") or {}).get("door_roi_version") != DOOR_ROI_VERSION:
+            return []  # older calibration: its absent list used other rules -> not trusted
+        return list(cal.get("absent") or [])
+
     def roi(self, key: str, t: float):
         if key == "door":
             cal = self._cal
-            if cal is not None and cal.get("door") and (cal.get("meta") or {}).get("door_roi_version") == DOOR_ROI_VERSION:
-                return cal["door"]  # calibrate() already ran the current chain
+            if cal is not None and (cal.get("meta") or {}).get("door_roi_version") == DOOR_ROI_VERSION:
+                return cal.get("door")  # calibrate() already ran the current chain (None = no door)
             if self._door_roi is None:  # once per call: same ROI -> one cached reference
                 ov = (self.cal or {}).get("door_openvocab")
                 roi = select_door_roi(self.frame, self.timeline, ov)[0]
                 # nothing better from the current chain: keep a caller-supplied / older door box
                 self._door_roi = [roi if roi is not None else (cal or {}).get("door")]
             return self._door_roi[0]
+        if key == "hands":  # hand-over area: visitor + cashier boxes at t (people at the desk)
+            return hands_roi(self.timeline, t)
         box = (self.cal or {}).get(key)
         if box is None and key == "laptop":
             box = _coco_laptop(self.timeline, t)
@@ -652,7 +750,8 @@ class _Ctx:
 def _probe_door(ctx: _Ctx, req: ProbeRequest) -> ProbeResult:
     roi = req.roi or ctx.roi("door", req.t)
     if roi is None:
-        return ProbeResult(req.cue, req.t, None, 0.0, [req.t], "cv:door_diff", {"error": "no_door_roi"})
+        why = "zone_absent" if "door" in ctx.absent else "no_door_roi"
+        return ProbeResult(req.cue, req.t, None, 0.0, [req.t], "cv:door_diff", {"error": why, "why": why})
     ref_info = ctx.door_ref(roi)
     ref_t = ref_info["t"]
     ref = ctx.frame(ref_t)
@@ -688,9 +787,11 @@ def _probe_door(ctx: _Ctx, req: ProbeRequest) -> ProbeResult:
 def _probe_blocked(ctx: _Ctx, req: ProbeRequest) -> ProbeResult:
     ts = (ctx.timeline.get("series") or {}).get("t") or [0.0]
     ref_t = float(ts[0])
-    ref = ctx.frame(ref_t) if abs(ref_t - req.t) > 1e-3 else None
-    v, c, raw = cheap.camera_blocked(ctx.frame(req.t), ref)
-    return ProbeResult(req.cue, req.t, v, c, [req.t], "cv:blocked", {"ref_t": ref_t, **raw})
+    if getattr(ctx, "blocked_series", None) is None:  # one low-res pass per call (bounded past the deadline)
+        ctx.blocked_series = cheap.camera_blocked_series(ctx.video_path, ctx.transform, ref_t, deadline=ctx.deadline,
+                                                         duration=ctx.timeline.get("duration") or None)
+    v, c, raw = cheap.series_at(ctx.blocked_series, req.t)
+    return ProbeResult(req.cue, req.t, v, c, [raw.get("sample_t", req.t)], "cv:blocked", raw)
 
 
 def _probe_vlm(ctx: _Ctx, req: ProbeRequest) -> ProbeResult:
@@ -700,10 +801,14 @@ def _probe_vlm(ctx: _Ctx, req: ProbeRequest) -> ProbeResult:
     if req.cue in COCO_MAP:
         coco = cheap.coco_evidence(ctx.timeline, req.t, COCO_MAP[req.cue], window=1.0, strong=COCO_STRONG)
 
-    if ctx.vlm_s >= budget_s() or time.perf_counter() - ctx.t0 >= budget_s():
+    zone = ZONE_OF_CUE.get(req.cue)
+    roi = req.roi or (ctx.roi(spec.roi, req.t) if spec.roi else None)  # laptop: incl. per-frame COCO
+    if roi is None and zone is not None and zone in ctx.absent:
+        # calibration found no such object (safe/laptop) and nothing else locates it: no answer
+        val, conf, raw = None, 0.0, {"why": "zone_absent", "zone": zone}
+    elif ctx.vlm_s >= budget_s() or time.perf_counter() - ctx.t0 >= budget_s():
         val, conf, raw = None, 0.0, {"skipped": "budget"}
     else:
-        roi = req.roi or (ctx.roi(spec.roi, req.t) if spec.roi else None)
         imgs = [(_crop(ctx.frame(t), roi, spec.margin, spec.min_side) if roi else _full(ctx.frame(t))) for t in ts]
         if spec.autocontrast and roi is not None:
             imgs = [autocontrast(im) for im in imgs]
@@ -757,9 +862,14 @@ def run_probes(video_path: str, requests: list[ProbeRequest], *, timeline: dict,
     marked down for the rest of it; the next call re-checks once.
 
     `deadline` (time.monotonic() value): once passed, remaining VLM requests return value=None with
-    raw why "deadline" without calling the VLM; CV cues still run when cheap (camera_blocked always;
-    door_open only if its ROI and reference are already known)."""
+    raw why "deadline" without calling the VLM; CV cues still run when cheap (camera_blocked always:
+    its series is built first, bounded past the deadline; door_open only if its ROI and reference
+    are already known)."""
     ctx = _Ctx(video_path, timeline, transform, calibration, deadline)
+    try:  # camera series first, before any VLM request can eat the time
+        next((_probe_blocked(ctx, r) for r in requests if r.cue == "camera_blocked"), None)
+    except Exception as e:  # noqa: BLE001
+        log.warning("camera_blocked series failed: %s", e)
     if any(r.cue in questions.SPECS for r in requests) and not (deadline is not None and time.monotonic() >= deadline):
         try:
             get_client().begin_batch()

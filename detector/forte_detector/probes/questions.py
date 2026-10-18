@@ -34,6 +34,17 @@ DESK_FIXED = ("Ignore the fixed equipment: the banknote counting machine, the sm
 
 # Desk cues use the calibrated desk crop upscaled (672 px; cash 896 px): on full 464x848 frames a small cash stack
 # or two stamps are a few pixels and the 4B model answers "no" (X-38 @30-34 s, X-24 @12 s).
+# calibration gate for the door zone (not a cue): a room view vs a close-up of a table / objects.
+# Asking "is there a door?" directly failed: the 4B model says "no" for glass doors that look like part
+# of a glass partition (PC test on t=0 frames, 42 open + 14 external clips: door question 34/56, this
+# room-view question 55/56; the door-less close-ups ext11-14 -> no, every cash-room clip -> yes).
+DOOR_GATE_PROMPT = ("Is this a view of a room (walls, floor or furniture visible), as opposed to a close-up of "
+                    "a table top or of objects? Answer yes for a room view.")
+
+BNH_PROMPT = (SCENE + "Is someone holding paper money in their hand, or passing banknotes or a bundle of notes "
+              "from hand to hand? Ignore money lying on the desk or inside the counting machine. A small "
+              "plastic ID card or a passport is not money.")
+
 SPECS: dict[str, QuestionSpec] = {
     "cash_on_desk": QuestionSpec(
         # tuned live (4B): pointing at the desk surface and saying the bundle may be small fixes X-38
@@ -100,6 +111,25 @@ SPECS: dict[str, QuestionSpec] = {
         "telephone with a handset and cord and any devices standing on the desk.",
         multi="any",
     ),
+    # T13 (PhoneRule): one narrow question per crop. phone_held: the request's roi = one person's box
+    # (cashier / visitor near the desk); phone_on_desk: the calibrated desk crop (full frame without one).
+    "phone_held": QuestionSpec(
+        "Close-up of a person in a bank cash room, cropped from a ceiling security camera image. Is this "
+        "person holding a mobile phone (a smartphone, often a small dark rectangle) in a hand? Answer yes "
+        "even if the screen is not visible. A banknote, a stack of notes or a plastic card is not a phone; "
+        "ignore the desk telephone with a handset and cord.",
+        margin=0.2, min_side=672,
+    ),
+    "phone_on_desk": QuestionSpec(
+        DESK + "Is a mobile phone (a smartphone: a flat dark glass rectangle) lying on the desk? It may be "
+        "partly covered by banknotes or papers, so look for its edge too. " + DESK_FIXED
+        + "Also ignore calculators, keyboards, card terminals and the desk telephone with a handset and cord.",
+        roi="desk", margin=0.05, min_side=672,
+        full_prompt=SCENE + "Is a mobile phone (a smartphone: a flat dark glass rectangle) lying on the desk "
+        "or table? It may be partly covered by banknotes or papers, so look for its edge too. "
+        + FIXED + "Also ignore calculators, keyboards, card terminals and the desk telephone with a handset "
+        "and cord.",
+    ),
     # T15 keys on "no" here. A desk/client-side crop with a card-vs-banknotes prompt was tried
     # (43b541a) and was WORSE on the PC full.analyze probe logs (video-level 7/13 vs 9/13: upscaled
     # notes in hands read as "card"), so the full-frame question stays.
@@ -108,6 +138,13 @@ SPECS: dict[str, QuestionSpec] = {
         "(credit-card size) or a passport booklet? Banknotes, stacks of cash, cash bags and paper "
         "slips are NOT identity documents - answer no if only money is being handed over.",
         multi="any",
+    ),
+    # per-frame veto for id_document_shown "yes" (T15): during a banknote hand-over the ID question
+    # answers "yes" because notes in hand look like a card; this asks only about money in hands.
+    # Crop = the people at the desk (visitor + cashier boxes, margin 0.3) upscaled to 896 px: on the
+    # full frame the notes are a few pixels (PC test, 17 cases: full 10/17, hands crop 12/17)
+    "banknotes_in_hand": QuestionSpec(
+        BNH_PROMPT, roi="hands", margin=0.3, min_side=896, full_prompt=BNH_PROMPT,
     ),
     "counting_machine_used": QuestionSpec(
         SCENE + "Look at the black banknote counting machine. Is it being used: banknotes loaded in it, "

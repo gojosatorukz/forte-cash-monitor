@@ -285,6 +285,7 @@ display:flex;align-items:center;justify-content:center;min-height:100vh;padding:
 .card{width:100%;max-width:420px;background:#fff;border:1px solid var(--line);border-radius:14px;
 padding:34px 32px 28px;box-shadow:0 1px 2px rgba(44,38,48,.04),0 18px 48px rgba(74,2,33,.08)}
 .brand{margin-bottom:26px}.brand svg{display:block;width:118px;height:auto}
+.brand--neutral svg{width:190px}.brand--neutral span{margin-top:12px}
 .brand b{display:block;margin-top:12px;font-size:15px;font-weight:650;color:var(--brand-d)}
 .brand span{display:block;margin-top:4px;font-size:10px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;
 color:var(--muted)}
@@ -321,9 +322,23 @@ def _asset_svg(name: str) -> str:
 
 # Official Forte logo (assets/brand/forte-magenta.svg), inlined; the alt text is on the wrapper.
 BRAND_SVG = _asset_svg("forte-magenta.svg").replace("<svg ", '<svg aria-hidden="true" focusable="false" ', 1)
+# BRAND=neutral: our own Cash Monitor wordmark (outlined paths, no Forte artwork).
+NEUTRAL_BRAND_SVG = _asset_svg("cash-monitor-wordmark.svg").replace(
+    "<svg ", '<svg aria-hidden="true" focusable="false" ', 1)
 
-_FAVICON_SVG = _asset_svg("favicon.svg")
-FAVICON = ("data:image/svg+xml," + quote(_FAVICON_SVG, safe=" =:/'\"")) if _FAVICON_SVG else ""
+
+def _data_uri(svg: str) -> str:
+    return ("data:image/svg+xml," + quote(svg, safe=" =:/'\"")) if svg else ""
+
+
+FAVICON = _data_uri(_asset_svg("favicon.svg"))
+NEUTRAL_FAVICON = _data_uri(_asset_svg("favicon-neutral.svg"))
+PRODUCT = {"forte": "Forte Cash Monitor", "neutral": "Cash Monitor"}
+
+
+def _neutral(brand: str) -> bool:
+    return brand == "neutral"
+
 
 SHIELD_SVG = (
     '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5l6 2.4v4.4c0 4-2.6 7-6 8.2-3.4-1.2-6-4.2-6-8.2V4.9z" '
@@ -332,8 +347,9 @@ SHIELD_SVG = (
 )
 
 
-def _page(title: str, body: str, cls: str = "") -> str:
-    icon = f'<link rel="icon" href="{html.escape(FAVICON, quote=True)}" type="image/svg+xml">' if FAVICON else ""
+def _page(title: str, body: str, cls: str = "", brand: str = "forte") -> str:
+    favicon = NEUTRAL_FAVICON if _neutral(brand) else FAVICON
+    icon = f'<link rel="icon" href="{html.escape(favicon, quote=True)}" type="image/svg+xml">' if favicon else ""
     return (
         '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -341,19 +357,23 @@ def _page(title: str, body: str, cls: str = "") -> str:
         f'<title>{html.escape(title)}</title>'
         f'{icon}<style>{LOGIN_CSS}</style></head><body>'
         f'<div><main class="card{(" " + cls) if cls else ""}">{body}</main>'
-        '<div class="foot">Forte Cash Monitor · Datathon 26</div></div></body></html>'
+        f'<div class="foot">{PRODUCT["neutral" if _neutral(brand) else "forte"]} · Datathon 26</div>'
+        '</div></body></html>'
     )
 
 
-def _brand() -> str:
+def _brand(brand: str = "forte") -> str:
+    if _neutral(brand):
+        return ('<div class="brand brand--neutral"><div role="img" aria-label="Cash Monitor">' + NEUTRAL_BRAND_SVG
+                + '</div><span>Контроль кассовой дисциплины</span></div>')
     return ('<div class="brand"><div role="img" aria-label="Forte">' + BRAND_SVG + '</div>'
             '<b>Cash Monitor</b><span>Контроль кассовой дисциплины</span></div>')
 
 
-def login_page(next_path: str, error: str | None = None) -> str:
+def login_page(next_path: str, error: str | None = None, brand: str = "forte") -> str:
     err = f'<p class="err" role="alert">{html.escape(error)}</p>' if error else ""
     body = (
-        f'{_brand()}<p class="eyebrow">Рабочее пространство</p><h1>Вход в систему</h1>{err}'
+        f'{_brand(brand)}<p class="eyebrow">Рабочее пространство</p><h1>Вход в систему</h1>{err}'
         '<form method="post" action="/login" id="login-form">'
         f'<input type="hidden" name="next" id="next" value="{html.escape(next_path, quote=True)}">'
         '<label for="password">Пароль</label>'
@@ -365,14 +385,14 @@ def login_page(next_path: str, error: str | None = None) -> str:
         '<script>(function(){var n=document.getElementById("next");'
         'if(location.hash&&n.value.indexOf("#")<0)n.value+=location.hash;})();</script>'
     )
-    return _page("Вход — Forte Cash Monitor", body)
+    return _page("Вход — " + PRODUCT["neutral" if _neutral(brand) else "forte"], body, brand=brand)
 
 
-def disabled_page() -> str:
-    return _page("Веб-интерфейс отключён", f'{_brand()}<h1>{html.escape(UI_DISABLED)}</h1>'
+def disabled_page(brand: str = "forte") -> str:
+    return _page("Веб-интерфейс отключён", f'{_brand(brand)}<h1>{html.escape(UI_DISABLED)}</h1>'
                  '<p class="note">API для внешних систем (/api/v1) работает. Администратору: задайте '
                  'стойкий UI_PASSWORD (не короче 12 символов, не «change-me») в .env и перезапустите '
-                 'сервис.</p>', cls='disabled')
+                 'сервис.</p>', cls='disabled', brand=brand)
 
 
 # ---------- ASGI plumbing ----------
@@ -417,6 +437,7 @@ class UiGate:
         self.hours = float(settings.ui_session_hours)
         self.trusted = parse_networks(settings.trusted_proxies)
         self.limiter = LoginLimiter()
+        self.brand = getattr(settings, "brand", "forte")  # BRAND: login/disabled page logo only
         password_ok = usable_password(settings.ui_password)
         if settings.ui_password and not password_ok:
             log.error("UI_PASSWORD is a placeholder or shorter than %d characters: treated as UNSET, the web UI "
@@ -475,7 +496,7 @@ class UiGate:
             if path.startswith("/ui-api/") or path == "/ui-api":
                 await _send(send, 503, _json(UI_DISABLED), b"application/json")
             else:
-                await _send(send, 503, disabled_page().encode(), b"text/html; charset=utf-8")
+                await _send(send, 503, disabled_page(self.brand).encode(), b"text/html; charset=utf-8")
             return
         if self._valid(scope):
             await self.app(scope, receive, send)
@@ -492,7 +513,7 @@ class UiGate:
     async def _login(self, scope, receive, send):
         method = scope.get("method", "GET")
         if self.mode == "disabled":
-            await _send(send, 503, disabled_page().encode(), b"text/html; charset=utf-8")
+            await _send(send, 503, disabled_page(self.brand).encode(), b"text/html; charset=utf-8")
             return
         qs = parse_qs(scope.get("query_string", b"").decode("latin-1"))
         if method in ("GET", "HEAD"):
@@ -500,7 +521,7 @@ class UiGate:
             if self.mode == "open" or self._valid(scope):
                 await _send(send, 303, b"", b"text/plain", [(b"location", _location(nxt))])
                 return
-            await _send(send, 200, login_page(nxt).encode(), b"text/html; charset=utf-8")
+            await _send(send, 200, login_page(nxt, brand=self.brand).encode(), b"text/html; charset=utf-8")
             return
         if method != "POST":
             await _send(send, 405, _json("Используйте GET или POST"), b"application/json",
@@ -527,14 +548,15 @@ class UiGate:
         if wait > 0:
             mins = max(1, math.ceil(wait / 60))
             msg = f"Слишком много попыток, попробуйте через {mins} мин"
-            await _send(send, 429, login_page(nxt, msg).encode(), b"text/html; charset=utf-8",
+            await _send(send, 429, login_page(nxt, msg, brand=self.brand).encode(), b"text/html; charset=utf-8",
                         [(b"retry-after", str(math.ceil(wait)).encode())])
             return
         password = (form.get("password") or [""])[0].encode("utf-8")
         if not hmac.compare_digest(password, self.password):
             self.limiter.fail(info.ip)
             log.warning("UI login failed from %s", info.ip)
-            await _send(send, 401, login_page(nxt, "Неверный пароль").encode(), b"text/html; charset=utf-8")
+            await _send(send, 401, login_page(nxt, "Неверный пароль", brand=self.brand).encode(),
+                        b"text/html; charset=utf-8")
             return
         self.limiter.reset(info.ip)
         token = make_token(self.key, self.hours)

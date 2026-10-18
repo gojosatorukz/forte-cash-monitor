@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 
 import numpy as np
+
+from forte_detector.concurrency import SingletonCache
 
 log = logging.getLogger(__name__)
 
@@ -54,10 +57,13 @@ def ov_device() -> str:
 class OpenVocabDetector:
     """detect(image_bgr, queries) -> {key: (score, [x0, y0, x1, y1] pixels)} (best box per key)."""
 
+    _lock = threading.RLock()  # class default (objects built via __new__ in tests); __init__ sets one per instance
+
     def __init__(self, model_id: str | None = None, device: str | None = None, max_side: int = 960):
         import torch
         from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
+        self._lock = threading.RLock()  # forward + OOM move to CPU on this shared model (+ HF processor)
         self.model_id = model_id or ov_model()
         dev = device or ov_device()
         if dev.startswith("cuda") and not torch.cuda.is_available():
@@ -89,15 +95,17 @@ class OpenVocabDetector:
             pass
 
     def detect(self, image: np.ndarray, queries: dict[str, list[str]]) -> dict[str, tuple[float, list[float]]]:
-        """Best box per key; a CUDA OOM (the VLM grew) moves the model to CPU for good and retries."""
-        try:
-            return self._detect(image, queries)
-        except self._torch.OutOfMemoryError as exc:
-            if str(self.device) == "cpu":
-                raise
-            log.warning("open-vocab CUDA OOM (%s); falling back to CPU", exc)
-            self._to_cpu()
-            return self._detect(image, queries)
+        """Best box per key; a CUDA OOM (the VLM grew) moves the model to CPU for good and retries.
+        Thread-safe: serialised on the model lock (shared singleton; see forte_detector/concurrency.py)."""
+        with self._lock:
+            try:
+                return self._detect(image, queries)
+            except self._torch.OutOfMemoryError as exc:
+                if str(self.device) == "cpu":
+                    raise
+                log.warning("open-vocab CUDA OOM (%s); falling back to CPU", exc)
+                self._to_cpu()
+                return self._detect(image, queries)
 
     def _detect(self, image: np.ndarray, queries: dict[str, list[str]]) -> dict[str, tuple[float, list[float]]]:
         from PIL import Image
@@ -143,15 +151,13 @@ class OpenVocabDetector:
         return best
 
 
-_DETECTORS: dict = {}
+_DETECTORS = SingletonCache()
 
 
 def get_detector() -> OpenVocabDetector:
-    """Warm singleton per model id (the device is chosen once, at first load)."""
+    """Warm singleton per model id (the device is chosen once, at first load). Thread-safe init."""
     m = ov_model()
-    if m not in _DETECTORS:
-        _DETECTORS[m] = OpenVocabDetector(m, ov_device())
-    return _DETECTORS[m]
+    return _DETECTORS.get_or_create(m, lambda: OpenVocabDetector(m, ov_device()))
 
 
 def pick_frames(timeline: dict, n: int = 3) -> list[float]:

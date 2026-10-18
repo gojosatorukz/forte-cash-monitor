@@ -18,6 +18,13 @@ deadline it returns why "deadline", with the failure budget used up the server i
 failed requests never exceed the budget: worst case per batch ~ 2 s check + 40 s + <= 3 s health
 check, and nothing runs past the deadline. The local server is reached without any proxy
 (http_proxy / HTTPS_PROXY are ignored).
+
+Concurrency (several analyze() threads share one client): all availability / failure state above is
+PER JOB - it lives in a ``threading.local`` and run_probes() (begin_batch) runs in the analyze()
+thread, so one slow or failing job never marks the VLM down for another; there is no process-wide
+down flag (each job's own check / health check decides). At most ``FORTE_VLM_SLOTS`` (default 4 =
+llama-server -np 4) requests are in flight at once (BoundedSemaphore); a request's timeout clock
+starts only after it got a slot, and waiting for a slot is itself bounded by the deadline.
 """
 from __future__ import annotations
 
@@ -134,6 +141,22 @@ def _answer_probs(logprobs: dict | None, choices=("yes", "no")) -> dict | None:
     return None
 
 
+def vlm_slots() -> int:
+    return max(1, int(os.environ.get("FORTE_VLM_SLOTS", "4")))
+
+
+class _JobState:
+    """Availability / failure accounting of one probe batch (one analyze() thread)."""
+
+    __slots__ = ("avail", "failures", "batch_down", "fail_time")
+
+    def __init__(self) -> None:
+        self.avail: tuple[float, bool] | None = None  # (checked_at, up)
+        self.failures = 0
+        self.batch_down = False  # sticky until begin_batch()
+        self.fail_time = 0.0
+
+
 def _number_prob(logprobs: dict | None) -> float | None:
     if not logprobs:
         return None
@@ -163,29 +186,31 @@ class VLMClient:
         self.max_failures = max_failures
         self.fail_budget_s = (fail_budget_s if fail_budget_s is not None
                               else float(os.environ.get("FORTE_VLM_FAIL_BUDGET_S", "40")))
-        self._fail_time = 0.0
         self._post = post or _http_post
         self._get = get or _http_get
-        self._avail: tuple[float, bool] | None = None  # (checked_at, up)
-        self._failures = 0
-        self._batch_down = False  # sticky until begin_batch()
-        self._lock = threading.Lock()
+        self._local = threading.local()  # per-thread (= per analyze() job) _JobState
+        self._slots = threading.BoundedSemaphore(vlm_slots())  # concurrent POSTs (llama-server -np)
         self.model: str | None = None
+
+    @property
+    def _st(self) -> _JobState:
+        st = getattr(self._local, "st", None)
+        if st is None:
+            st = self._local.st = _JobState()
+        return st
 
     # ------------------------------------------------------------------ availability
     def begin_batch(self) -> None:
-        """Start of a probe batch (one video): forget the down-flag and re-check once."""
-        self._batch_down = False
-        self._failures = 0
-        self._fail_time = 0.0
-        self._avail = None
+        """Start of a probe batch (one video) in this thread: forget its down-flag and re-check once."""
+        self._local.st = _JobState()
 
     def available(self) -> bool:
-        if self._batch_down:
+        st = self._st
+        if st.batch_down:
             return False
         now = time.monotonic()
-        if self._avail is not None and now - self._avail[0] < self.avail_ttl:
-            return self._avail[1]
+        if st.avail is not None and now - st.avail[0] < self.avail_ttl:
+            return st.avail[1]
         try:
             d = self._get(_models_url(self.url), min(2.0, self.timeout))
             data = d.get("data") or d.get("models") or []
@@ -203,9 +228,9 @@ class VLMClient:
             else:
                 log.warning("VLM server unavailable at %s: %s", self.url, e)
                 up = False
-        self._avail = (now, up)
-        # do NOT reset _failures here: a hung server can still answer /v1/models quickly
-        self._batch_down = not up
+        st.avail = (now, up)
+        # do NOT reset failures here: a hung server can still answer /v1/models quickly
+        st.batch_down = not up
         return up
 
     def _health_ok(self) -> bool:
@@ -219,26 +244,34 @@ class VLMClient:
 
     def _mark_down(self, why: str) -> None:
         log.warning("VLM marked down for the rest of this batch: %s", why)
-        self._avail = (time.monotonic(), False)
-        self._batch_down = True
+        st = self._st
+        st.avail = (time.monotonic(), False)
+        st.batch_down = True
 
     def _mark_failure(self, elapsed: float = 0.0) -> None:
         """Down for the batch when (a) max_failures consecutive failures AND the health check fails, or
         (b) failed calls have used up the batch failure budget (bounds the worst case: 2 x 20 s)."""
-        self._failures += 1
-        self._fail_time += elapsed
-        if self._fail_time >= self.fail_budget_s:
-            self._mark_down(f"failed calls took {self._fail_time:.1f}s >= budget {self.fail_budget_s:.0f}s")
-        elif self._failures >= self.max_failures:
+        st = self._st
+        st.failures += 1
+        st.fail_time += elapsed
+        if st.fail_time >= self.fail_budget_s:
+            self._mark_down(f"failed calls took {st.fail_time:.1f}s >= budget {self.fail_budget_s:.0f}s")
+        elif st.failures >= self.max_failures:
             if self._health_ok():
-                self._failures = 0  # server alive (e.g. one slow call under load): keep using it
+                st.failures = 0  # server alive (e.g. one slow call under load): keep using it
             else:
-                self._mark_down(f"{self._failures} consecutive failures and failed health check")
+                self._mark_down(f"{st.failures} consecutive failures and failed health check")
 
     # ------------------------------------------------------------------ raw call
     def ask(self, images: list[np.ndarray], prompt: str, grammar: str, labels: list[str] | None = None,
             max_tokens: int = 24, timeout: float | None = None) -> dict:
-        """POST one question; returns {"text", "logprobs", "wall_s", "timings"}. Raises on HTTP error."""
+        """POST one question; returns {"text", "logprobs", "wall_s", "timings"}. Raises on HTTP error.
+        Waits for a free server slot first (unbounded here; _call bounds the wait by the deadline)."""
+        with self._slots:
+            return self._ask(images, prompt, grammar, labels, max_tokens, timeout)
+
+    def _ask(self, images, prompt, grammar, labels, max_tokens, timeout) -> dict:
+        """The POST itself; the caller holds a slot."""
         content = []
         for i, im in enumerate(images):
             if labels:
@@ -254,8 +287,7 @@ class VLMClient:
             "grammar": grammar,
         }
         t0 = time.perf_counter()
-        with self._lock:  # llama-server runs -np 1: keep calls sequential
-            d = self._post(self.url, body, self.timeout if timeout is None else timeout)
+        d = self._post(self.url, body, self.timeout if timeout is None else timeout)
         wall = time.perf_counter() - t0
         ch = d["choices"][0]
         text = ch["message"]["content"]
@@ -275,18 +307,33 @@ class VLMClient:
             timeout = min(timeout, deadline - time.monotonic() - self.deadline_margin_s)
             if timeout < self.min_call_s:
                 return None, {"why": "deadline", "skipped": "deadline"}
-        budget_left = self.fail_budget_s - self._fail_time
+        st = self._st
+        budget_left = self.fail_budget_s - st.fail_time
         if budget_left < self.min_call_s:  # strict: failed calls never exceed the batch budget
             self._mark_down(f"failure budget left {budget_left:.1f}s < {self.min_call_s}s")
             return None, {"error": "vlm_unavailable", "url": self.url, "why": "fail_budget"}
-        timeout = min(timeout, budget_left)
-        t0 = time.perf_counter()
+        # wait for a server slot (other jobs' requests in flight), at most until the deadline allows
+        wait = None
+        if deadline is not None:
+            wait = max(0.0, deadline - time.monotonic() - self.deadline_margin_s - self.min_call_s)
+        if not self._slots.acquire(timeout=wait):
+            return None, {"why": "deadline", "skipped": "deadline", "slot_wait_s": round(wait or 0.0, 2)}
         try:
-            out = self.ask(images, prompt, grammar, labels=labels, max_tokens=max_tokens, timeout=timeout)
-        except Exception as e:  # noqa: BLE001
-            self._mark_failure(time.perf_counter() - t0)
-            return None, {"error": f"{type(e).__name__}: {e}"}
-        self._failures = 0
+            # the request's timeout clock starts after the slot wait; the deadline clamp still applies
+            timeout = min(self.timeout, budget_left)
+            if deadline is not None:
+                timeout = min(timeout, deadline - time.monotonic() - self.deadline_margin_s)
+                if timeout < self.min_call_s:
+                    return None, {"why": "deadline", "skipped": "deadline"}
+            t0 = time.perf_counter()
+            try:
+                out = self._ask(images, prompt, grammar, labels, max_tokens, timeout)
+            except Exception as e:  # noqa: BLE001
+                self._mark_failure(time.perf_counter() - t0)
+                return None, {"error": f"{type(e).__name__}: {e}"}
+        finally:
+            self._slots.release()
+        st.failures = 0
         tm = out["timings"]
         raw = {"wall_s": out["wall_s"], "text": out["text"], "prompt_n": tm.get("prompt_n"),
                "predicted_n": tm.get("predicted_n"), "model": self.model}

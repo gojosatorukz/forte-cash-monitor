@@ -71,6 +71,7 @@ Measured with `spike/test_single.py both` on real 464×848 keyframes and ROI cro
   - `RULES_PATH=/home/kanat/forte/detector/taxonomy/rules.json`
   - `FORTE_VLM_URL=http://127.0.0.1:8090/v1/chat/completions`, `FORTE_DEVICE=cuda`
   - `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, `UV_OFFLINE=1`
+  - `FORTE_VLM_SLOTS=4`: must equal llama-server `-np` (NP in `run_server_pc.sh`), per forte-detector; added 2026-10-17 for the thread-safety release
 - Unit `~/.config/systemd/user/forte-service.service`:
   - `Wants=`/`After=forte-vlm.service`, so the VLM gets VRAM first
   - EnvironmentFile `~/forte/.env`, ExecStart `run.sh`, Restart=always
@@ -194,7 +195,7 @@ work/pc_eval.sh <sha|ref> --robust <dataset> ...      # forte-robust: robust/<da
 - Output: laptop `work/pc_runs/<sha12>-<variant|dataset>-<ts>/` (or `--out DIR`), in the harness format (`summary.json`, `report.md`, `<variant>/<vid>/result.json`). Metrics are recomputed with the harness's own functions from that commit. Extras: `pc_eval.json` (per-worker VRAM peaks) and `.gpu_mem.log`. PC copy: `~/forte/evals/<sha12>/runs/`.
 - Env: a shared offline venv `~/forte/evals/venvs/<hash of pyproject+uv.lock>` (`uv sync --frozen`, `UV_OFFLINE=1`; it fails rather than downloads). Each commit has its own cache `~/forte/evals/<sha12>/cache`, so re-runs of a sha replay perception/VLM answers. `--fresh` uses an empty per-run cache, for timing.
 - Knobs: every `FORTE_*` set in the laptop shell is forwarded to the PC workers, e.g. `FORTE_VERDICT_THR=0.5 work/pc_eval.sh <sha>`. The runner owns `FORTE_DATA_DIR`, `FORTE_CACHE_DIR`, `FORTE_EVAL_CACHE` and `FORTE_VLM_URL` and drops them; the VLM is PC-local. The variables travel as a NUL-separated file and are exported without eval, so no shell injection. The names are printed at start, and names+values go into the run's `pc_eval.json` (`forwarded_env`). With any knob forwarded, the cache is `<sha12>/cache-env-<hash of the knobs>`, so stale answers are never replayed.
-- Limits: at most **3 eval workers across all concurrent invocations** (flock on `~/forte/evals/slot.{0,1,2}.lock`; extra workers wait, and a waiting run's wall time includes the wait). Workers run at `nice 10`. Before each video a worker waits while GPU memory used is above 12 GB. A run refuses to start until VLM `:8090/health` is ok (5 min max).
+- Limits: at most **3 eval workers across all concurrent invocations** (flock on `~/forte/evals/slot.{0,1,2}.lock`; extra workers wait, and a waiting run's wall time includes the wait). A run starts at most as many workers as it has clips, and a worker still waiting for a slot exits once the other workers have claimed every clip. Workers run at `nice 10`. Before each video a worker waits while GPU memory used is above 12 GB. A run refuses to start until VLM `:8090/health` is ok (5 min max).
 - **Kill switch:** `ssh kanat@10.13.0.14 touch ~/forte/evals/STOP`. New runs are refused (exit 3, `REFUSED`). The path unit `forte-evals-stop.path` → `forte-evals-kill.service` SIGTERMs the running `eval_worker.py`/`run_eval_sha.sh` processes (SIGKILL after 10 s). The runner then merges the clips that finished, does not score the unfinished ones (listed in `pc_eval.json` `missing`, `stopped: true`) and exits 6 `STOPPED`. The wrapper still fetches the partial run and prints `STOPPED`. Ctrl-C in the wrapper does the same. The merge step runs as `eval_merge.py`, outside the pkill pattern. Re-enable: `rm ~/forte/evals/STOP && systemctl --user stop forte-evals-kill.service`.
 - Measured (17ddd4e, 42 orig clips, 3 workers, 2026-10-17): wall **414 s**, against 563 s for the sequential c5ef2b6 robust run. Verdicts and types are identical on all 40 shared clips (12/22, FP 0/20). The gain is small because the VLM still had **1 slot** (`/props total_slots=1`): probe time was 1150 s summed against 395 s sequential. Expect more once llama-server runs `-np 4`. Per worker: torch peak 819–836 MiB; process peak 1.17 GB with `expandable_segments` (1.42 GB without). GPU total peak 10.6 GB. During that run a production request (Х-17) took **29.2 s** (9 s idle). Set STOP before demos.
 
@@ -255,13 +256,25 @@ Public smoke with 3 eval workers running, so the timings are inflated:
 No warnings, not degraded.
 
 ## Jury-day runbook (2026-10-18, Almaty time; the PC clock is UTC = Almaty − 5 h)
+**Scope after 08:00 (orchestrator, final):** only the 08:05 baseline, the 08:20 burst, the 10:02 curate/export and the ~10:30 final external checks. There is no post-08:00 regression run: the 2a508df gate runs are the final numbers for the frozen detector 38f9946, which is deployed 2026-10-18 00:25. Rows below about a late detector release apply only if the orchestrator ships an emergency fix.
+
 | Time | Step | Who/how |
 |---|---|---|
 | **08:00** | Eval cut-off: `forte-evals-cutoff.timer` creates `~/forte/evals/STOP`, and the path unit kills in-flight eval workers | automatic (PC) |
 | **08:05** | Idle baseline: `forte-baseline.timer` runs `~/forte/baseline/run_baseline.sh` (Х-17/43/14 ×2 via https + 20 VLM calls) | automatic (PC) |
 | ~08:20 | Copy `~/forte/baseline/<ts>/log.txt` numbers into this doc (deck numbers) and send them to orchestrator + forte-docs | forte-deploy |
+| **07:00–08:15** | **The burst must test the FINAL detector.** The improvement-release cut-off is about 07:00. If the orchestrator fast-forwards detector main, deploy it **before 08:15**; evals are stopped from 08:00, so the restart is safe. Run the usual rsync, offline uv sync and restart, plus a smoke test of Х-17/Х-26. If a detector release lands **after** the burst has run, re-run the burst after that deploy and before 10:00: `ssh kanat@10.13.0.14 systemctl --user start forte-burst.service` (logs in a new `~/forte/burst/<ts>/`). | orchestrator → forte-deploy |
+| **08:20 (automatic, PC timer `forte-burst.timer`)** | Runs `~/forte/burst/burst_pc.sh` (source `work/burst_pc.sh`). It waits for the baseline and any eval processes to finish, then for JOB_WORKERS in 3, 2, 1: sets it, restarts, waits until all workers are ready, submits 6 videos via https and checks pass/fail. The first passing level stays configured. Log: `~/forte/burst/<ts>/log.txt`. A dry run on 2026-10-17 (1 worker, Х-17 + Х-43) passed. forte-deploy copies the results into this doc. | automatic → forte-deploy |
+| (manual alternative) | **Concurrency switch and burst test.** Set `JOB_WORKERS=3` in PC `~/forte/.env`, run `systemctl --user restart forte-service`, check that `/healthz` shows `workers.configured=3, ready=3`. Then run `work/burst.sh` from the laptop: Х-14/17/26/32/43/35 submitted within about 2 s via https. **Pass** = all done, none failed, none `degraded` or carrying a «без VLM» warning; record the max submit→done time and the GPU peak. **If it fails:** set `JOB_WORKERS=2`, restart and re-run; if that fails too, go back to `JOB_WORKERS=1`, which is the current production behaviour. | forte-deploy |
+| any time, if the team decides (task #241) | **Brand flip:** set `BRAND=neutral` in PC `~/forte/.env` (the neutral «Cash Monitor» wordmark and CM favicon), run `systemctl --user restart forte-service` (about 20 s of downtime, so not while a job is in flight), and check that `/healthz` shows `"brand":"neutral"`. Revert with `BRAND=forte`. | forte-deploy |
 | by ~09:30 | Final ff of detector/service main (orchestrator), then deploy: rsync (excl. .venv .claude data models .env), `UV_OFFLINE=1 uv sync --frozen --inexact`, `systemctl --user restart forte-service`, public smoke Х-17/Х-26/Х-32/Х-43 | orchestrator → forte-deploy |
-| **10:00** | Freeze and curate: `ssh kanat@10.13.0.14 ~/forte/curate_jobs.sh` (source `work/curate_jobs.sh`). It stops the service, moves data/{jobs,clips,uploads} to `data.bak-<ts>` and starts the service. It then runs Х-17, Х-26 and Х-43 via https and adds a completed review on Х-17 («Демо-проверяющий», all violations confirmed, decision confirmed). It prints the act URL, which then has no ЧЕРНОВИК. Check the act in headless Chromium. | forte-deploy |
+| **10:00** | Freeze and curate: `ssh kanat@10.13.0.14 ~/forte/curate_jobs.sh` (source `work/curate_jobs.sh`). It stops the service, moves data/{jobs,clips,uploads} to `data.bak-<ts>` and starts the service. It then runs Х-17, Х-26, Х-32 and Х-43 via https and adds a completed review on Х-17 («Демо-проверяющий», all violations confirmed, decision confirmed). It prints the act URL, which then has no ЧЕРНОВИК. Check the act in headless Chromium. | forte-deploy |
+| 10:00 (right after curation) | **Export the final artifacts** to `share/final/`, for the four curated jobs (Х-17 reviewed, Х-26, Х-32, Х-43; the records carry `meta.procedure` from detector ≥450e9f6, needed for the «Процедура» screenshots):
+- the raw records `data/jobs/<id>.json`, including `review`
+- `data/clips/<id>/`
+- `versions.txt` with the live BRAND, service SHA (bba8e54 expected) and detector SHA (38f9946 expected)
+
+Command: `rsync -a kanat@10.13.0.14:forte/service/data/jobs/ share/final/jobs/` (then keep only those 3 ids, though after curation the store only holds them) and the same for `data/clips/`. Then message **forte-service**, which captures the final screenshot set from a local replay. | forte-deploy |
 | **10:30** | Final external checks (below) | forte-deploy |
 | ≤12:00 | Submit (URL https://forte.incode.kz, API key for the jury) | orchestrator / user |
 
@@ -311,3 +324,141 @@ Final external checks at 10:30:
   | orig | 19/22 | 3/20, all team-T15 (0/16 excluding them) | hard-neg 2/19, hit@5s 82% |
   | reencode | 18/22 | 4/16 excl. | |
   | newcam | 15/22 | 9/20 | |
+
+## Service d650940 (live 2026-10-17)
+- No default API key: `/api/v1` returns 503 unless `API_KEY` is at least 16 characters (ours is 32). `/healthz` reports `api_key_configured: true` and `workers: {configured: 1, ready: 1}`.
+- `JOB_WORKERS=1` is set in `~/forte/.env`, so behaviour is unchanged. Х-17 via https: T9 @ 7.27 in 17.8 s. The gate still redirects (303).
+
+## Production detector cb77b44 (= gated 46b8c29), live 2026-10-17; service still 0a1878a
+- Smoke via https, under eval load:
+
+  | Clip | Result | Time |
+  |---|---|---|
+  | Х-17 | T9 @ 7.27 | 27.2 s |
+  | Х-26 | T1 @ 12.38 | 31.8 s |
+  | Х-32 | T5 @ 1.0 | 22.5 s |
+  | Х-43 | clean | 13.9 s |
+
+  Frames come as [annotated, raw, annotated] plus a clip.
+- Gate numbers (orchestrator):
+
+  | Set | Recall | FP | Other |
+  |---|---|---|---|
+  | orig | 20/22 | 0/16 excluding team-T15 | hard-neg 2/19, hit@5s 82% |
+  | reencode | 19/22 | | |
+  | newcam | 14/22 | | |
+
+  Max runtime is 83 s.
+
+## Service bba8e54 (BRAND switch + analyzer-load watchdog), live 2026-10-17
+- `~/forte/.env`: `BRAND=forte`, `JOB_WORKERS=1`.
+- `/healthz` (public): `brand: forte`, `api_key_configured: true`, workers 1/1, analyzer_ready, vlm_ok.
+- Х-17 via https: T9 @ 7.27 in 26.0 s, under eval load. The gate redirects (303) to `/login`, and the login title is «Вход — Forte Cash Monitor».
+
+## Detector e018e47 (thread-safety release), live 2026-10-17 23:15 Almaty
+- `~/forte/.env` has `FORTE_VLM_SLOTS=4` (= llama-server -np) and `JOB_WORKERS=1`.
+- Public smoke: Х-17 T9 @ 7.27 (32.1 s), Х-26 T1 @ 12.38 (26.3 s), not degraded, under eval load.
+- The burst at 3, 2 or 1 workers is scheduled on the PC for 08:20 (`forte-burst.timer`).
+
+## Detector 38f9946 (= improvement release 2a508df), live 2026-10-18 00:25 Almaty: FINAL candidate
+- `JOB_WORKERS=1`, `FORTE_VLM_SLOTS=4`.
+- Public smoke under eval load:
+
+  | Clip | Result | Time |
+  |---|---|---|
+  | Х-17 | T9 @ 7.27 | 30.3 s |
+  | Х-26 | T1 @ 12.38 | 27.3 s |
+  | Х-32 | T5 @ 1.0 | 19.0 s |
+  | Х-43 | clean | 20.2 s |
+  | Х-35 | T15 @ 9.0 (low) + **T10 @ 33.77 (low, new)** | 65.0 s, 41 VLM calls |
+
+  None degraded.
+- Gate numbers (orchestrator):
+
+  | Set | Recall | FP |
+  |---|---|---|
+  | orig | 20/22 | 0/16 excluding team-T15 |
+  | reencode | 18/22 (TP→FN 2) | |
+  | newcam | 16/22 | |
+
+- The 08:20 burst will test this build.
+
+## FINAL combined rollout, 2026-10-18 07:10 Almaty
+- Versions: **detector 67d1dbe** (T13 phone, T14 covered-from-start, meta.procedure), **service b360036** (live replay, 8-item checklist, procedure panel) and **BRAND=neutral**, in one restart. `JOB_WORKERS=1`, `FORTE_VLM_SLOTS=4`. The previous env is backed up as `~/forte/.env.bak-before-final`.
+- `/healthz` (public): brand=neutral, api_key_configured, workers 1/1, analyzer_ready, vlm_ok.
+- Gate: `/` → 303 `/login`; `/ui-api/jobs` → 401. Login title «Вход — Cash Monitor», with 0 "Forte" occurrences on the login page.
+- Public smoke (evals had already finished, so near idle):
+
+  | Clip | Result | Time |
+  |---|---|---|
+  | Х-17 | T9 @ 7.27 | 12.6 s |
+  | Х-26 | T1 @ 12.38 | 12.1 s |
+  | Х-32 | T5 @ 1.0 | 11.3 s |
+  | Х-43 | clean | 10.0 s |
+  | Х-35 | T15 @ 9.0 + T10 @ 33.77 | 29.9 s |
+
+  None degraded.
+- Х-17 `meta.analyzer.procedure`: `collection_handover` «Приём сумки от инкассатора», confidence 0.85, with steps (step 1 bag_check = violation T9 @ 7.27).
+- Headless logged-in UI: the «Операция» panel renders with 10 steps (1 violation, 1 not checked, 8 compliant), plus the checklist and the violation card. Screenshot: `share/final_rollout/ui_x17_operation_panel_neutral.png`.
+
+## Jury-day results on the FINAL build (detector 67d1dbe, service b360036, BRAND=neutral)
+### Idle baseline (PC timer, 2026-10-18 08:05 Almaty; STOP present, 0 eval workers, GPU idle at 6.9 GB)
+Uploads go from the PC through https://forte.incode.kz.
+
+| Clip | Round 1 submit→done | Round 2 submit→done | Analyzer runtime (r1 / r2) | Upload | Result |
+|---|---|---|---|---|---|
+| Х-17 (15 s) | 13.3 s | **7.1 s** | 11.0 / 5.0 s | 1.4–1.6 s | T9 @ 7.27 |
+| Х-43 (20 s) | 11.2 s | **7.0 s** | 8.0 / 4.1 s | 2.6 s | clean |
+| Х-14 (142 s) | 34.7 s | **27.0 s** | 18.8 / 9.9 s | 15–16 s | clean |
+
+- Round 1 includes first-run warm-up; round 2 is steady state. For Х-14, most of the time is the upload through the PC's uplink, not analysis.
+- VLM per call, idle, 1 caller, full image prefill (`cache_prompt` off), short answer: **p50 0.31 s, p95 0.32 s** (n=20).
+
+### Concurrency burst (PC timer, 08:20 Almaty): **PASS with JOB_WORKERS=3, kept**
+6 videos submitted in 34.9 s, uploads included.
+
+| Clip | submit→done | Analyzer runtime | Result |
+|---|---|---|---|
+| Х-14 | 74.7 s | 37.0 s | clean |
+| Х-17 | 36.7 s | 23.0 s | T9 @ 7.27 |
+| Х-26 | 38.0 s | 23.8 s | T1 @ 12.38 |
+| Х-32 | 35.4 s | 19.8 s | T5 @ 1.0 |
+| Х-35 | **80.2 s (max)** | 42.8 s | T15 + T10 |
+| Х-43 | 51.1 s | 16.7 s | clean |
+
+- None failed, partial or degraded, and no warnings.
+- GPU peak 7.1 GB of 16 GB, utilization 99%.
+- Production now runs `JOB_WORKERS=3`.
+
+## 09:47 swap: service d6e22c0 + detector 8540d83 (one restart), 2026-10-18 09:48 Almaty: FINAL
+- Eval window closed on time: STOP was recreated at 09:45:29 by the PC timer, no eval processes were left, and the GPU was production-only. `FORTE_T3_FALLBACK_PYES` is unset; `JOB_WORKERS=3`, `FORTE_VLM_SLOTS=4`, `BRAND=neutral`.
+- Public `/healthz` no longer has `vlm_url` or `rules_path`. Keys: ok, analyzer_ready, analyzer_error, api_key_configured, brand=neutral, public_url(+source), rules_count, vlm_ok, workers (3/3). Gate: `/` → 303, `/ui-api/jobs` → 401.
+- Smoke via https:
+
+  | Clip | Result | Time | Notes |
+  |---|---|---|---|
+  | Х-17 | T9 @ 7.27 | 13.5 s | description ends «… Основание: Постановление Правления НБРК № 231 от 29.11.2019, п. 24 пп. 1), 3), 4).» |
+  | Х-22 | **T3 @ 16.77** (medium, conf 0.285) | 19.0 s | «…проверьте сейф: дверца или ключ» |
+  | Х-26 | T1 @ 12.38 + **T3 @ 12.38** (new, low conf) | 11.8 s | |
+  | Х-43 | clean | 9.7 s | |
+  | Х-44 | clean | 9.6 s | |
+  | Х-12 | T3 @ 36.77 (conf 0.285) | 22.3 s | |
+
+  None degraded.
+- UI card (headless, logged in): the description has no «Основание:» suffix, and the source appears once, in «НАРУШЕННАЯ НОРМА», so there is no duplication.
+- Sample response for the docs: `share/final/sample_response_x17.json` (image_base64 cut to 20 characters + «…»), with `share/final/sample_response_x17.meta.txt` alongside it (hashes, time, suffix = yes).
+
+## Curation and freeze, 2026-10-18 09:52–09:55 Almaty
+- `~/forte/curate_jobs.sh` ran on the final build. The old store is kept at `~/forte/service/data.bak-20261018T045225Z`.
+- The store now holds:
+
+  | Clip | Job id | Result | meta.procedure |
+  |---|---|---|---|
+  | Х-17 | 7e81f2b9… | T9, reviewed by «Демо-проверяющий» (confirmed) | collection_handover |
+  | Х-26 | d1ab3237… | T1 + T3 | unknown |
+  | Х-32 | ddce4c18… | T5 | no_client |
+  | Х-43 | e806a2b8… | clean | no_client |
+
+- Act https://forte.incode.kz/act.html#job=7e81f2b997fa491b85d0136d0db4b07b: final, no ЧЕРНОВИК, with the «Ход операции» table (checked in headless Chromium).
+- Exported to `share/final/`: `jobs/`, `clips/`, `versions.txt`, `act_x17_final.png`, `sample_response_x17.json` and `.meta.txt`.
+- **Production is FROZEN through judging** (orchestrator): no restarts and no config changes without the orchestrator.

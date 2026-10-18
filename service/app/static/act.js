@@ -159,7 +159,7 @@
       ]);
     }
     var rows = [
-      v.description ? ["Описание", el("span", { class: "pre", text: v.description })] : null,
+      (v.description_text || v.description) ? ["Описание", el("span", { class: "pre", text: v.description_text || v.description })] : null,
       ["Нарушенная норма", normBlock(rules)],
       ["Сила правовой нормы", el("span", { text: strengthText(v, rules) })],
       ["Комментарий проверяющего", el("span", { class: "pre" + (item.comment ? "" : " muted"), text: item.comment || "—" })]
@@ -194,8 +194,102 @@
     ]);
   }
 
+  /** Reviewer checklist: steps the camera cannot verify (definitions from /ui-api/rules `checklist`).
+   *  Grouped by `group` under subheadings; per group, answered items are listed in full and the
+   *  unanswered ones are folded into one «Не проверялось: …» line so the act stays short. */
+  var CL_GROUP_ORDER = ["Общие", "Выдача", "Инкассация", "Сомнительные купюры"];
+  function checklistBlock(defs, values) {
+    var by = {}, names = CL_GROUP_ORDER.slice();
+    defs.forEach(function (d) {
+      if (!d || !d.id) return;
+      var g = typeof d.group === "string" && d.group ? d.group : "Общие";
+      if (names.indexOf(g) < 0) names.push(g);
+      (by[g] = by[g] || []).push(d);
+    });
+    var out = [], n = 0;
+    names.filter(function (g) { return by[g]; }).forEach(function (g) {
+      var done = by[g].filter(function (d) { return values[d.id] === true || values[d.id] === false; });
+      var unset = by[g].filter(function (d) { return values[d.id] !== true && values[d.id] !== false; });
+      out.push(el("h3", { class: "cl-group", text: g }));
+      if (done.length) {
+        var list = el("ol", { class: "cl", start: String(n + 1) });
+        done.forEach(function (d) {
+          n++;
+          var v = values[d.id];
+          var st = v === true ? ["Да", "cl__st--yes"] : ["Нет", "cl__st--no"];
+          var basis = [d.document || d.document_short, d.basis].filter(Boolean).join(", ");
+          var href = safeUrl(d.url);
+          list.appendChild(el("li", { class: "cl__item" + (v === false ? " cl__item--no" : "") }, [
+            el("div", { class: "cl__row" }, [
+              el("span", { class: "cl__label", text: d.label_ru || d.id }),
+              el("span", { class: "cl__st " + st[1], text: st[0] })
+            ]),
+            basis ? el("div", { class: "cl__basis" }, ["Основание: " + basis,
+              href ? el("span", null, [" · ", el("a", { href: href, text: href })]) : null]) : null,
+            d.quote ? el("div", { class: "cl__quote", text: String(d.quote) }) : null
+          ]));
+        });
+        out.push(list);
+      }
+      if (unset.length) {
+        out.push(el("p", { class: "cl-unset" }, [el("span", { class: "cl__st cl__st--unset", text: "Не проверялось: " }),
+          unset.map(function (d) {
+            return (d.label_ru || d.id) + (d.basis ? " (" + [d.document_short, d.basis].filter(Boolean).join(", ") + ")" : "");
+          }).join("; ") + "."]));
+      }
+    });
+    var nNo = defs.filter(function (d) { return d && values[d.id] === false; }).length;
+    return [
+      el("p", { class: "note", text: "Документальные шаги, которые не видны на видеозаписи; отмечены проверяющим вручную." }),
+      nNo ? el("p", { class: "cl-alert", role: "note", text: "Внимание: не выполнено пунктов — " + nNo + "." }) : null
+    ].concat(out);
+  }
+
+  // Operation steps (`job.meta.procedure`, promoted and validated by the worker; re-checked here).
+  var PROC_ST = {
+    ok: ["Соблюдено", "pst--ok"], violation: ["Нарушение", "pst--bad"], risk: ["Риск", "pst--risk"],
+    not_checked: ["Не проверялось", "pst--na"], manual: ["Проверяется вручную", "pst--manual"]
+  };
+  function procedureOf(job) {
+    var p = job && job.meta && job.meta.procedure;
+    if (!p || typeof p !== "object" || !Array.isArray(p.steps)) return null;
+    var steps = p.steps.slice(0, 30).filter(function (s) { return s && typeof s === "object" && s.title_ru; });
+    return steps.length ? { p: p, steps: steps } : null;
+  }
+  function procedureBlock(pr) {
+    var p = pr.p;
+    var title = typeof p.title_ru === "string" ? p.title_ru.trim() : "";  // never mapped from `type`
+    var head = "Операция: " + (title || "не определена");
+    var conf = num(p.confidence);
+    if (conf !== null && conf >= 0 && conf <= 1) head += " (уверенность " + Math.round(conf * 100) + " %)";
+    return [
+      el("p", { class: "proc-op", text: head }),
+      p.basis_ru ? el("p", { class: "note", text: "Основание определения: " + String(p.basis_ru) }) : null,
+      el("table", { class: "grid proc-grid" }, [
+        el("thead", null, [el("tr", null, ["№", "Этап", "Статус", "Время", "Примечание"].map(function (h) {
+          return el("th", { scope: "col", text: h });
+        }))]),
+        el("tbody", null, pr.steps.map(function (s, i) {
+          var st = PROC_ST[s.status] || PROC_ST.not_checked;
+          var t = num(s.t_sec);
+          var noteText = s.note_ru ? String(s.note_ru).trim().replace(/[.\s]+$/, "") : "";
+          // Only a norm derived by the worker from the rules KB / checklist; never the detector's text.
+          var rule = (s.rule_source === "rules" || s.rule_source === "checklist") && s.rule ? String(s.rule) : "";
+          var note = [noteText, rule ? "Норма: " + rule : null].filter(Boolean).join(". ");
+          return el("tr", null, [
+            el("td", { class: "c-no", text: String(i + 1) }),
+            el("td", { text: String(s.title_ru) }),
+            el("td", { class: "nowrap" }, [el("span", { class: "pst " + st[1], text: st[0] })]),
+            el("td", { class: "nowrap", text: t !== null && t >= 0 ? mmss(t) : "—" }),
+            el("td", { class: note ? "" : "muted", text: note || "—" })
+          ]);
+        }))
+      ])
+    ];
+  }
+
   // ---------- render ----------
-  function render(job) {
+  function render(job, checklistDefs) {
     var review = job.review && typeof job.review === "object" ? job.review : {};
     var rvs = review.violations || {};
     var items = (Array.isArray(job.violations) ? job.violations : []).map(function (v, i) {
@@ -229,7 +323,10 @@
     // Header
     sheet.appendChild(el("header", { class: "act-head" }, [
       el("div", { class: "act-org" }, [
-        el("img", { class: "act-org__logo", src: "assets/brand/forte-magenta.svg", alt: "ForteBank", width: "92", height: "27" }),
+        // BRAND=neutral (data-brand set server-side on <html>): Cash Monitor wordmark instead of the Forte logo.
+        document.documentElement.getAttribute("data-brand") === "neutral"
+          ? el("img", { class: "act-org__logo act-org__logo--neutral", src: "assets/brand/cash-monitor-wordmark.svg", alt: "Cash Monitor", width: "220", height: "44" })
+          : el("img", { class: "act-org__logo", src: "assets/brand/forte-magenta.svg", alt: "ForteBank", width: "92", height: "27" }),
         el("span", { class: "act-org__unit", text: "Служба внутреннего контроля" })
       ]),
       el("div", { class: "act-head__right", text: "Для служебного пользования" })
@@ -262,6 +359,10 @@
       [["Идентификатор проверки", el("span", { class: "mono", text: job.job_id || "—" })]]
     ]), job.partial ? el("p", { class: "note", text: "Анализ остановлен по лимиту времени: запись могла быть проверена не полностью." }) : null]));
 
+    // Operation steps (hidden when the analyzer gave none)
+    var pr = procedureOf(job);
+    if (pr) sheet.appendChild(section(++no, "Ход операции", procedureBlock(pr)));
+
     // 2. Confirmed
     var secNo = ++no;
     sheet.appendChild(section(secNo, "Подтверждённые нарушения", confirmed.length
@@ -277,6 +378,12 @@
         compactTable(pending, false)
       ]));
     }
+
+    // Manual checklist (not visible on video)
+    var clValues = review.checklist && typeof review.checklist === "object" ? review.checklist : {};
+    var clDefs = Array.isArray(checklistDefs) ? checklistDefs : [];
+    if (!clDefs.length) clDefs = Object.keys(clValues).map(function (k) { return { id: k }; });
+    if (clDefs.length) sheet.appendChild(section(++no, "Проверено вручную (не видно на видео)", checklistBlock(clDefs, clValues)));
 
     // 5. Conclusion
     var stats = items.length
@@ -325,6 +432,10 @@
 
   var id = jobFromHash();
   if (!id) { showState("Не указана проверка: откройте акт со страницы результата.", true); return; }
+  // Checklist definitions are optional for the act: without them the stored ids are listed.
+  var checklistP = fetch("/ui-api/rules", { headers: { Accept: "application/json" }, cache: "no-store" })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (d) { return d && Array.isArray(d.checklist) ? d.checklist : []; }, function () { return []; });
   fetch("/ui-api/jobs/" + encodeURIComponent(id), { headers: { Accept: "application/json" }, cache: "no-store" })
     .then(function (r) {
       if (r.status === 401) {
@@ -342,7 +453,7 @@
           : "Акт можно сформировать только для успешно завершённой проверки.", true);
         return;
       }
-      render(job);
+      return checklistP.then(function (defs) { render(job, defs); });
     })
     .catch(function (err) { showState(err.message || String(err), true); });
 })();

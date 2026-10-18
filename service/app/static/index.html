@@ -16,9 +16,10 @@
   <!-- Sidebar (desktop) -->
   <aside class="sidebar" aria-label="Навигация">
     <a class="brand js-home" href="./" id="brand-link" aria-label="Forte Cash Monitor — новая проверка">
-      <img class="brand__logo" src="assets/brand/forte-magenta.svg" width="142" height="42" alt="Forte">
+      <!--brand:forte--><img class="brand__logo brand-forte" src="assets/brand/forte-magenta.svg" width="142" height="42" alt="Forte"><!--/brand:forte-->
+      <!--brand:neutral--><img class="brand__logo brand__logo--neutral brand-neutral" src="assets/brand/cash-monitor-wordmark.svg" width="220" height="44" alt="Cash Monitor"><!--/brand:neutral-->
     </a>
-    <div class="product-name">Cash Monitor<span>Контроль кассовой дисциплины</span></div>
+    <div class="product-name"><!--brand:forte-->Cash Monitor<!--/brand:forte--><span>Контроль кассовой дисциплины</span></div>
 
     <div class="sidebar-label">Рабочее пространство</div>
     <nav class="sidenav" aria-label="Разделы">
@@ -50,8 +51,9 @@
   <div class="shell">
     <header class="topbar">
       <a class="mobile-brand js-home" href="./" aria-label="Forte Cash Monitor — новая проверка">
-        <img src="assets/brand/forte-magenta.svg" width="84" height="25" alt="Forte">
-        <span>Cash Monitor</span>
+        <!--brand:forte--><img class="brand-forte" src="assets/brand/forte-magenta.svg" width="84" height="25" alt="Forte">
+        <span class="brand-forte">Cash Monitor</span><!--/brand:forte-->
+        <!--brand:neutral--><img class="mobile-brand__wordmark brand-neutral" src="assets/brand/cash-monitor-wordmark.svg" width="220" height="44" alt="Cash Monitor"><!--/brand:neutral-->
       </a>
       <div class="breadcrumb" aria-label="Расположение">
         <span>Рабочее пространство</span><span class="breadcrumb__sep" aria-hidden="true">/</span><span>Проверки</span><span class="breadcrumb__sep" aria-hidden="true">/</span><strong id="crumb-current">Новая проверка</strong>
@@ -240,7 +242,11 @@
             </div>
             <div class="player__inner">
               <div class="player__frame">
-                <video id="video" controls preload="metadata" playsinline></video>
+                <div class="player__box" id="player-box">
+                  <video id="video" controls preload="metadata" playsinline></video>
+                  <div class="live-chip" id="live-chip" hidden></div>
+                  <div class="live-toast" id="live-toast" role="status" aria-live="polite" aria-atomic="true"></div>
+                </div>
               </div>
               <div class="timeline-wrap">
                 <div class="timeline-label">События на записи</div>
@@ -249,7 +255,8 @@
                   <div class="timeline__markers" id="timeline-markers"></div>
                   <div class="timeline__head" id="timeline-head"></div>
                 </div>
-                <div class="timeline__labels"><span id="tl-start">0:00</span><span id="tl-end">—</span></div>
+                <div class="stage-strip" id="stage-strip" role="group" aria-label="Этапы операции на шкале времени" hidden></div>
+                <div class="timeline__labels"><span id="tl-start" title="Начало записи">00:00</span><span id="tl-cur" class="timeline__cur" title="Текущая позиция / длительность"></span><span id="tl-end" title="Длительность записи">—</span></div>
               </div>
               <dl class="meta-list" id="video-meta"></dl>
             </div>
@@ -257,6 +264,7 @@
 
           <div class="violations">
             <section class="card review-panel" id="review-panel" aria-labelledby="review-title" hidden></section>
+            <section class="card proc" id="procedure-panel" aria-labelledby="proc-title" hidden></section>
             <div class="violations__head">
               <h3 class="section-title"><span class="section-number">02</span> <span id="violations-title">Выявленные нарушения</span></h3>
             </div>
@@ -337,6 +345,7 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
+  <script src="live.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 </html>

@@ -39,9 +39,19 @@ fi
 # --inexact: keep packages added to the venv outside the lockfile (e.g. ML deps of a plugged-in analyzer).
 uv sync --frozen --inexact || uv sync --inexact
 
-if [[ -z "${API_KEY:-}" ]]; then
-    echo "warning: API_KEY is not set; the default key 'forte-datathon-2026' will be used." >&2
+# No default key: /api/v1/* answers 503 unless API_KEY has >= 16 characters (surrounding whitespace ignored).
+api_key_trimmed="$(printf '%s' "${API_KEY:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+if [[ ${#api_key_trimmed} -lt 16 ]]; then
+    dev_default="${API_KEY_DEV_DEFAULT:-}"
+    if [[ "${dev_default,,}" =~ ^(1|true|yes|on)$ ]]; then  # same values as app.config._env_bool
+        echo "WARNING: API_KEY_DEV_DEFAULT=1 - /api/v1 accepts the PUBLIC dev key. Local development only!" >&2
+    elif [[ -z "$api_key_trimmed" ]]; then
+        echo "warning: API_KEY is not set; /api/v1 will be disabled (503) unless API_KEY (>= 16 chars) is set." >&2
+    else
+        echo "warning: API_KEY is shorter than 16 characters; /api/v1 will be disabled (503) unless API_KEY (>= 16 chars) is set." >&2
+    fi
 fi
+unset api_key_trimmed dev_default
 
 if [[ -z "${UI_PASSWORD:-}" && "${UI_OPEN:-}" != "1" ]]; then
     echo "warning: UI_PASSWORD is not set; the web UI is disabled (503). /api/v1 works." >&2

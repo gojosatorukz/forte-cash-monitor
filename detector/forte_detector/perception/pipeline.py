@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 
 from forte_detector import config
+from forte_detector.concurrency import SingletonCache, atomic_write_text
 from forte_detector.labels import normalize_id
 from forte_detector.perception.timeline import TimelineParams, build_timeline
 from forte_detector.perception.tracker import (
@@ -27,7 +28,7 @@ from forte_detector.schema import ProgressCb, Transform
 from forte_detector.video_io import iter_frames, video_duration
 
 log = logging.getLogger(__name__)
-CACHE_VERSION = 18  # bump whenever tracking/timeline logic changes (timeline cache key)
+CACHE_VERSION = 20  # bump whenever tracking/timeline logic changes (timeline cache key)
 DET_CACHE_VERSION = 3  # bump when decoding/detection output changes (detections cache key)
 
 
@@ -64,19 +65,17 @@ def sampling_fps(fps: float, duration: float, max_samples: int) -> float:
     return fps
 
 
-_DETECTORS: dict = {}
+_DETECTORS = SingletonCache()  # shared across concurrent analyze() threads (one model in VRAM)
 
 
 def get_detector(cfg: PerceptionConfig, device: str | None):
     from forte_detector.perception.detector import Detector
 
     key = (cfg.model_id, cfg.input_size, cfg.person_thr, cfg.object_thr, cfg.batch_size, device)
-    if key not in _DETECTORS:
-        _DETECTORS[key] = Detector(
-            cfg.model_id, device=device, input_size=cfg.input_size, person_thr=cfg.person_thr,
-            object_thr=cfg.object_thr, batch_size=cfg.batch_size,
-        )
-    return _DETECTORS[key]
+    return _DETECTORS.get_or_create(key, lambda: Detector(
+        cfg.model_id, device=device, input_size=cfg.input_size, person_thr=cfg.person_thr,
+        object_thr=cfg.object_thr, batch_size=cfg.batch_size,
+    ))
 
 
 _SHA_MEMO: dict = {}
@@ -288,7 +287,7 @@ def _detect_video(video_path, transform, variant, cfg: PerceptionConfig, device,
     }
     if cp is not None and not truncated:
         cp.parent.mkdir(parents=True, exist_ok=True)
-        cp.write_text(json.dumps(out))
+        atomic_write_text(cp, json.dumps(out))
     out["cached"] = False
     return out
 
@@ -405,7 +404,7 @@ def perceive(
     }
     if cp is not None and not dets.get("truncated"):
         cp.parent.mkdir(parents=True, exist_ok=True)
-        cp.write_text(json.dumps(tl, ensure_ascii=False))
+        atomic_write_text(cp, json.dumps(tl, ensure_ascii=False))
     if progress_cb:
         progress_cb(1.0, "perception done")
     return tl

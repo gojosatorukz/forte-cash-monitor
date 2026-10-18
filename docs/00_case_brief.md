@@ -52,3 +52,4 @@ Organizers deliberately do NOT give the internal cashier regulation or a list of
 - `forte-vlm-spike` — tests whether Qwen3-VL-4B on 6GB can see the cues; results → `docs/spike_vlm.md`.
 - `forte-detector` — builds eval harness + perception + rule engine in `detector/`; status → `docs/status_detector.md`.
 - `forte-deploy` (bg e90083b9) — deploys VLM + service on the 5080 PC (kanat@10.13.0.14); status → `docs/status_deploy.md`.
+- `forte-footage` — collects + labels external cash-room footage (YouTube/stock) into robust/external2/; status → docs/status_footage.md.

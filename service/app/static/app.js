@@ -509,6 +509,7 @@
     state.aspect = w && h ? w / h : null;  // number (w/h); clips use it until their own metadata loads
     if (state.aspect) video.style.aspectRatio = w + " / " + h;
     else video.style.removeProperty("aspect-ratio");
+    setLandscape(state.aspect !== null && state.aspect > 1.05);
     renderVideoMeta(vm);
     renderTimeline();
 
@@ -530,8 +531,268 @@
     } else {
       vs.forEach(function (v, i) { list.appendChild(renderViolation(v, i)); });
     }
+    renderProcedure(job);
     renderReview(job, vs);
   }
+
+  // ---------- Operation steps (job.meta.procedure) ----------
+  // Status -> [icon, text label, css modifier]. The icon is decorative; the label is always present.
+  var PROC_ST = {
+    ok: ["✓", "Соблюдено", "ok"],
+    violation: ["✕", "Нарушение", "bad"],
+    risk: ["⚠", "Риск", "risk"],
+    not_checked: ["—", "Не проверялось", "na"],
+    manual: ["✎", "Проверяется вручную", "manual"]
+  };
+  /** Client-side re-check of meta.procedure (the worker validates it, but a record may carry it raw). */
+  function procedureOf(job) {
+    var p = job && job.meta && job.meta.procedure;
+    if (!p || typeof p !== "object" || !Array.isArray(p.steps)) return null;
+    var steps = [];
+    p.steps.slice(0, 30).forEach(function (s) {
+      if (!s || typeof s !== "object" || typeof s.title_ru !== "string" || !s.title_ru.trim()) return;
+      var t = num(s.t_sec);
+      steps.push({
+        title: s.title_ru.trim(),
+        status: PROC_ST.hasOwnProperty(s.status) ? s.status : "not_checked",
+        t: s.t_sec !== null && s.t_sec !== undefined && t !== null && t >= 0 ? t : null,
+        typeIds: Array.isArray(s.type_ids) ? s.type_ids.filter(function (x) { return typeof x === "string" && x; }).slice(0, 10) : [],
+        note: typeof s.note_ru === "string" ? s.note_ru : "",
+        // Only a norm the worker derived from the rules KB / checklist is shown; a raw detector
+        // `rule` (free text, unverified) never reaches the screen.
+        rule: (s.rule_source === "rules" || s.rule_source === "checklist") && typeof s.rule === "string" ? s.rule : "",
+        ruleUrl: (s.rule_source === "rules" || s.rule_source === "checklist") ? safeUrl(s.rule_url) : null,
+        checklistIds: Array.isArray(s.checklist_ids) ? s.checklist_ids.filter(function (x) { return typeof x === "string"; }) : []
+      });
+    });
+    if (!steps.length) return null;
+    var conf = num(p.confidence);
+    return {
+      title: typeof p.title_ru === "string" ? p.title_ru.trim() : "",  // never derived from `type`
+      confidence: conf !== null && conf >= 0 && conf <= 1 ? conf : null,
+      basis: typeof p.basis_ru === "string" ? p.basis_ru.trim() : "",
+      steps: steps
+    };
+  }
+
+  function flashCard(card) {
+    card.classList.remove("is-flash");
+    void card.offsetWidth;  // restart the animation
+    card.classList.add("is-flash");
+  }
+  /** Scroll to the reviewer checklist; focus the first of `ids` (checklist item ids) if present. */
+  function focusChecklist(ids) {
+    var box = document.querySelector("#review-panel:not([hidden]) .rv-checklist:not([hidden])");
+    if (!box) { toast("Чек-лист проверяющего доступен в панели проверки после загрузки результата"); return; }
+    var target = null;
+    (ids || []).some(function (id) {
+      target = Array.prototype.find.call(box.querySelectorAll(".cl-item"), function (li) { return li.getAttribute("data-id") === id; }) || null;
+      return !!target;
+    });
+    var grp = target && target.closest("details.cl-group");
+    if (grp) grp.open = true;
+    var flash = target || box;
+    flash.scrollIntoView({ behavior: "smooth", block: "center" });
+    flash.classList.remove("is-flash");
+    void flash.offsetWidth;
+    flash.classList.add("is-flash");
+    var first = flash.querySelector("button");
+    if (first) { try { first.focus({ preventScroll: true }); } catch (e) { first.focus(); } }
+  }
+
+  function renderProcedure(job) {
+    var panel = $("procedure-panel");
+    panel.textContent = "";
+    var pr = procedureOf(job);
+    if (!pr) { panel.hidden = true; return; }
+    panel.hidden = false;
+    var counts = {};
+    pr.steps.forEach(function (s) { counts[s.status] = (counts[s.status] || 0) + 1; });
+
+    var head = el("div", { class: "proc__head" }, [
+      el("h3", { class: "proc__title", id: "proc-title" }, [
+        el("span", { class: "proc__eyebrow", text: "Операция" }),
+        el("span", { class: "proc__name" + (pr.title ? "" : " proc__name--unknown"), text: pr.title || "не определена" })
+      ]),
+      pr.confidence !== null ? el("span", { class: "chip proc__conf", title: "Уверенность определения операции",
+        text: "Уверенность " + Math.round(pr.confidence * 100) + "%" }) : null
+    ]);
+    panel.appendChild(head);
+    if (pr.basis) panel.appendChild(el("p", { class: "proc__basis", text: "Основание: " + pr.basis }));
+
+    // One-line summary: all-ok is the "everything checked" story; otherwise counts per status.
+    var allOk = counts.ok === pr.steps.length;
+    var summary = allOk
+      ? [ICONS.check(), "Все этапы операции соблюдены (" + pr.steps.length + ")"]
+      : ["violation", "risk", "manual", "not_checked", "ok"].filter(function (k) { return counts[k]; })
+          .map(function (k) { return el("span", { class: "proc__count pstep--" + PROC_ST[k][2], text: PROC_ST[k][1] + ": " + counts[k] }); });
+    panel.appendChild(el("p", { class: "proc__summary" + (allOk ? " proc__summary--ok" : "") }, summary));
+
+    var list = el("ol", { class: "proc__steps", "aria-label": "Этапы операции" });
+    pr.steps.forEach(function (s, i) {
+      var st = PROC_ST[s.status];
+      var actions = [];
+      if (s.t !== null) {
+        actions.push(el("button", { type: "button", class: "timecode timecode--sm",
+          "aria-label": "Этап «" + s.title + "»: перейти к моменту " + fmtTime(s.t),
+          onclick: function () { seekTo(s.t, true); } }, [ICONS.play(), fmtTime(s.t)]));
+      }
+      s.typeIds.forEach(function (tid) {
+        var idx = -1;
+        state.violations.some(function (v, vi) { if (typeIdOf(v) === tid) { idx = vi; return true; } return false; });
+        if (idx < 0) { actions.push(el("span", { class: "type-id proc__tid", title: "Тип нарушения " + tid, text: tid })); return; }
+        actions.push(el("button", { type: "button", class: "type-id proc__tid proc__tid--link",
+          "aria-label": "Показать нарушение " + tid,
+          text: tid, onclick: function () {
+            var card = $("violation-" + idx);
+            if (!card) return;
+            highlightViolation(idx, false);
+            card.scrollIntoView({ behavior: "smooth", block: "start" });
+            flashCard(card);
+          } }));
+      });
+      if (s.status === "manual") {
+        actions.push(el("button", { type: "button", class: "proc__manual", text: "Отметить в чек-листе",
+          onclick: function () { focusChecklist(s.checklistIds); } }));
+      }
+      var li = el("li", { class: "pstep pstep--" + st[2] }, [
+        el("span", { class: "pstep__icon", "aria-hidden": "true", text: st[0] }),
+        el("div", { class: "pstep__body" }, [
+          el("div", { class: "pstep__row" }, [
+            el("span", { class: "pstep__title", text: (i + 1) + ". " + s.title }),
+            el("span", { class: "pstep__status", text: st[1] })
+          ]),
+          s.note ? el("p", { class: "pstep__note", text: s.note }) : null,
+          s.rule ? el("p", { class: "pstep__rule" }, ["Норма: ",
+            s.ruleUrl ? el("a", { href: s.ruleUrl, target: "_blank", rel: "noopener noreferrer", text: s.rule }) : s.rule]) : null,
+          actions.length ? el("div", { class: "pstep__actions" }, actions) : null
+        ])
+      ]);
+      s.li = li;
+      list.appendChild(li);
+    });
+    panel.appendChild(list);
+    liveSetup(pr);
+  }
+
+  // ---------- Live replay of the steps while the video plays (LIVE_REPLAY, app/static/live.js) ----------
+  // Stage strip under the timeline, current-step highlight in «Операция», «Этап N/M» chip and a
+  // violation toast on the player. Crossing effects fire only during normal forward play.
+  var LIVE_WIN_SEC = 1.5;   // half-width of a step's segment on the strip
+  var LIVE_TOAST_MS = 2500;
+  var live = { steps: [], cur: null, prevT: null, toastTimer: null };
+  function liveEnabled() {
+    return document.documentElement.getAttribute("data-live") !== "0" && !!window.LiveReplay;
+  }
+  /** Steps with a finite t_sec that are not manual, sorted by time; n = 1-based position among them. */
+  function liveSetup(pr) {
+    liveClear();
+    if (!pr || !liveEnabled()) { renderStageStrip(); return; }
+    var timed = pr.steps.filter(function (s) { return s.t !== null && s.status !== "manual"; })
+      .map(function (s, i) { return { src: s, t_sec: s.t, order: i }; });
+    timed.sort(function (a, b) { return a.t_sec - b.t_sec || a.order - b.order; });
+    timed.forEach(function (x, i) { x.n = i + 1; x.title = x.src.title; x.status = x.src.status; x.li = x.src.li; });
+    live.steps = timed;
+    live.prevT = num(video.currentTime);
+    renderStageStrip();
+    liveTick(true);
+  }
+  function liveClear() {
+    live.steps.forEach(function (x) { if (x.li) x.li.classList.remove("is-current"); });
+    live.steps = []; live.cur = null; live.prevT = null;
+    clearTimeout(live.toastTimer);
+    var t = $("live-toast"); t.classList.remove("is-on"); t.textContent = "";
+    $("live-chip").hidden = true;
+  }
+  /** Violation interval [start, end] for a step whose type_ids match a violation (the one nearest t_sec). */
+  function liveViolationSpan(x) {
+    var best = null, bestD = Infinity;
+    state.violations.forEach(function (v) {
+      if (x.src.typeIds.indexOf(typeIdOf(v)) < 0) return;
+      var a = num(v.start_sec), b = num(v.end_sec);
+      if (a === null || b === null || !(b > a)) return;
+      var dist = x.t_sec < a ? a - x.t_sec : x.t_sec > b ? x.t_sec - b : 0;
+      if (dist < bestD) { bestD = dist; best = [a, b]; }
+    });
+    return best;
+  }
+  function renderStageStrip() {
+    var strip = $("stage-strip");
+    strip.textContent = "";
+    var d = effectiveDuration();
+    if (!live.steps.length || !d) { strip.hidden = true; return; }
+    strip.hidden = false;
+    live.steps.forEach(function (x, i) {
+      var span = liveViolationSpan(x), lo, hi;
+      if (span) { lo = span[0]; hi = span[1]; }
+      else {
+        var prev = live.steps[i - 1], next = live.steps[i + 1];
+        lo = x.t_sec - LIVE_WIN_SEC; hi = x.t_sec + LIVE_WIN_SEC;
+        if (prev) lo = Math.max(lo, (prev.t_sec + x.t_sec) / 2);
+        if (next) hi = Math.min(hi, (x.t_sec + next.t_sec) / 2);
+      }
+      lo = Math.max(0, Math.min(d, lo)); hi = Math.max(lo, Math.min(d, hi));
+      var st = PROC_ST[x.status];
+      var label = "Этап " + x.n + ": " + x.title + " — " + st[1];
+      // A violation interval sits under the ±window segments (CSS z-index) so neighbours stay clickable;
+      // DOM (= tab) order stays chronological.
+      x.seg = el("button", {
+        type: "button", class: "stage-seg stage-seg--" + st[2] + (span ? " stage-seg--span" : "") + (live.cur === x ? " is-current" : ""),
+        title: label + " · " + fmtTime(x.t_sec), "aria-label": label,
+        style: "left:" + (lo / d * 100) + "%;width:" + ((hi - lo) / d * 100) + "%",
+        onclick: function () { seekTo(x.t_sec, true, true); }
+      });
+      strip.appendChild(x.seg);
+    });
+  }
+  function restartAnim(node, cls) {
+    if (!node) return;
+    node.classList.remove(cls);
+    void node.offsetWidth;  // restart the animation
+    node.classList.add(cls);
+  }
+  function liveToast(msg) {
+    var t = $("live-toast");
+    clearTimeout(live.toastTimer);
+    t.textContent = msg;
+    t.classList.add("is-on");
+    live.toastTimer = setTimeout(function () { t.classList.remove("is-on"); t.textContent = ""; }, LIVE_TOAST_MS);
+  }
+  function liveLand(x) {
+    var cls = { ok: "is-land-ok", violation: "is-land-bad", risk: "is-land-risk" }[x.status];
+    if (cls) { restartAnim(x.li, cls); restartAnim(x.seg, cls); }
+    if (x.status === "violation") liveToast("Нарушение: " + x.title);
+  }
+  /** Highlight + chip from currentTime; landing effects for steps crossed since the last sample. */
+  function liveTick(noLanding) {
+    if (!live.steps.length) return;
+    var t = num(video.currentTime) || 0;
+    var cur = window.LiveReplay.stepAtTime(live.steps, t);
+    if (cur !== live.cur) {
+      live.steps.forEach(function (x) {
+        if (x.li) x.li.classList.toggle("is-current", x === cur);
+        if (x.seg) x.seg.classList.toggle("is-current", x === cur);
+      });
+      live.cur = cur;
+      var chip = $("live-chip");
+      if (cur) {
+        chip.textContent = "Этап " + cur.n + "/" + live.steps.length + ": " + cur.title;
+        chip.className = "live-chip live-chip--" + PROC_ST[cur.status][2];
+        chip.hidden = false;
+      } else chip.hidden = true;
+    }
+    if (!noLanding) window.LiveReplay.crossedSteps(live.steps, live.prevT, t).forEach(liveLand);
+    live.prevT = t;
+  }
+  // The timeupdate of a seek is queued after `seeking` is already false (but before `seeked`),
+  // so a seek is tracked from its `seeking` event: no landing until `seeked`. Paused-state
+  // timeupdates (the one fired by pause()) still count — they report real play progress.
+  var liveSeeking = false;
+  video.addEventListener("seeking", function () { liveSeeking = true; });
+  video.addEventListener("timeupdate", function () { liveTick(liveSeeking || video.seeking); });
+  video.addEventListener("seeked", function () { liveSeeking = false; liveTick(true); });
+  video.addEventListener("emptied", function () { liveSeeking = false; });
+  video.addEventListener("play", function () { live.prevT = num(video.currentTime); });
 
   // Analyzer / service notes (e.g. «анализ выполнен без VLM-проверок…»), shown above the violations.
   function renderWarnings(ws) {
@@ -658,7 +919,8 @@
     else if (v.rule) rules = [v.rule];
     var scores = renderScores(v, rules.length > 0);
     if (scores) card.appendChild(scores);
-    if (v.description) card.appendChild(el("p", { class: "vcard__desc", text: v.description }));
+    var descText = v.description_text || v.description;
+    if (descText) card.appendChild(el("p", { class: "vcard__desc", text: descText }));
 
     var frames = Array.isArray(v.evidence_frames) ? v.evidence_frames.filter(function (f) { return f && f.image_base64; }) : [];
     var clip = clipUrl(v.clip_url);
@@ -725,10 +987,9 @@
       poster: poster && poster.image_base64 ? "data:image/jpeg;base64," + poster.image_base64 : null
     });
     vid.muted = true;  // the attribute alone does not mute in every browser
-    if (state.aspect) vid.style.setProperty("--ar", String(state.aspect));
-    vid.addEventListener("loadedmetadata", function () {
-      if (vid.videoWidth && vid.videoHeight) vid.style.setProperty("--ar", String(vid.videoWidth / vid.videoHeight));
-    });
+    // --ar (w/h) lives on the <figure>: it sizes the figure (capped at 100 % of the card) and the
+    // video inherits it as its aspect-ratio, so portrait and landscape clips both fit a phone.
+    var setAr = function (ar) { if (wrap) wrap.style.setProperty("--ar", String(ar)); };
     var showControls = function () { vid.controls = true; };
     var hideControls = function () { if (document.activeElement !== vid && !vid.matches(":hover")) vid.controls = false; };
     vid.addEventListener("mouseenter", showControls);
@@ -736,7 +997,11 @@
     vid.addEventListener("mouseleave", hideControls);
     vid.addEventListener("blur", hideControls);
     if (clipObserver) clipObserver.observe(vid);
-    var wrap = el("figure", { class: "vclip" }, [
+    var wrap = null;
+    vid.addEventListener("loadedmetadata", function () {
+      if (vid.videoWidth && vid.videoHeight) setAr(vid.videoWidth / vid.videoHeight);
+    });
+    wrap = el("figure", { class: "vclip" }, [
       el("div", { class: "vmedia__label", "aria-hidden": "true", text: "Видеофрагмент" }),
       vid,
       t !== null ? el("figcaption", { class: "vclip__cap" }, [
@@ -746,6 +1011,7 @@
         })
       ]) : null
     ]);
+    if (state.aspect) setAr(state.aspect);
     vid.addEventListener("error", function () {
       // Clip missing or unplayable: drop it; the frame thumbnails below remain.
       if (clipObserver) clipObserver.unobserve(vid);
@@ -802,10 +1068,12 @@
   function lsSet(k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* storage unavailable */ } }
   function hhmm(d) { return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); }
 
-  /** Merge patch b into patch a (violation entries merged per number); returns a. */
+  /** Merge patch b into patch a (violation entries merged per number, checklist per item); returns a. */
   function mergePatch(a, b) {
     Object.keys(b || {}).forEach(function (k) {
-      if (k === "violations") {
+      if (k === "checklist") {
+        a.checklist = Object.assign({}, a.checklist || {}, b.checklist);
+      } else if (k === "violations") {
         a.violations = a.violations || {};
         Object.keys(b.violations).forEach(function (n) {
           a.violations[n] = Object.assign({}, a.violations[n] || {}, b.violations[n]);
@@ -815,6 +1083,107 @@
       }
     });
     return a;
+  }
+
+  // Reviewer checklist (steps the camera cannot verify), served with /ui-api/rules as `checklist`.
+  var CL_STATES = [[true, "Да", "yes"], [false, "Нет", "no"], [null, "—", "unset"]];
+  var checklistP = null;
+  function getChecklist() {
+    if (!checklistP) {
+      checklistP = fetchJSON(API + "/rules").then(function (d) {
+        return Array.isArray(d && d.checklist) ? d.checklist : [];
+      }, function () { checklistP = null; return []; });
+    }
+    return checklistP;
+  }
+
+  function clValue(id) {
+    var v = rv.local.checklist[id];
+    return v === true || v === false ? v : null;
+  }
+
+  function rvRenderChecklistItem(row) {
+    var cur = clValue(row.id);
+    row.btns.forEach(function (b, i) {
+      var on = CL_STATES[i][0] === cur;
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+      b.classList.toggle("is-on", on);
+    });
+    row.node.classList.toggle("cl-item--no", cur === false);
+    row.node.classList.toggle("cl-item--yes", cur === true);
+  }
+
+  function renderChecklist(session, box, items) {
+    if (rv !== session) return;
+    box.textContent = "";
+    if (!items.length) { box.hidden = true; return; }
+    box.hidden = false;
+    var lid = "cl-" + Date.now().toString(36);
+    box.appendChild(el("div", { class: "cl-head" }, [
+      el("span", { class: "field__label", id: lid, text: "Чек-лист проверяющего" }),
+      el("span", { class: "cl-sub", text: "Шаги, которые не видны на видео. Необязательно — не влияет на формирование акта." })
+    ]));
+    var groups = clGroups(items);
+    groups.forEach(function (g, gi) {
+      var list = el("ul", { class: "cl-list", "aria-label": g.name });
+      var count = el("span", { class: "cl-group__count" });
+      var refresh = function () {
+        var n = g.items.filter(function (it) { return clValue(String(it.id)) !== null; }).length;
+        count.textContent = "отмечено " + n + " из " + g.items.length;
+      };
+      var title = el("span", { class: "cl-group__title", text: g.name });
+      if (gi === 0) {
+        box.appendChild(el("div", { class: "cl-group cl-group--open", role: "group", "aria-labelledby": lid },
+          [el("div", { class: "cl-group__head" }, [title, count]), list]));
+      } else {
+        box.appendChild(el("details", { class: "cl-group" },
+          [el("summary", { class: "cl-group__head" }, [title, count]), list]));
+      }
+      g.items.forEach(function (it) { clItem(session, list, it, refresh); });
+      refresh();
+    });
+  }
+
+  /** Checklist items grouped by `group` (fixed order first, unknown groups after; missing -> «Общие»). */
+  var CL_GROUP_ORDER = ["Общие", "Выдача", "Инкассация", "Сомнительные купюры"];
+  function clGroups(items) {
+    var by = {}, names = CL_GROUP_ORDER.slice();
+    items.forEach(function (it) {
+      if (!it || !it.id) return;
+      var g = typeof it.group === "string" && it.group ? it.group : "Общие";
+      if (names.indexOf(g) < 0) names.push(g);
+      (by[g] = by[g] || []).push(it);
+    });
+    return names.filter(function (n) { return by[n]; }).map(function (n) { return { name: n, items: by[n] }; });
+  }
+
+  function clItem(session, list, it, refresh) {
+    var id = String(it.id), label = String(it.label_ru || id);
+    var row = { id: id, node: el("li", { class: "cl-item", "data-id": id }) };
+    row.btns = CL_STATES.map(function (st) {
+      return el("button", { type: "button", class: "seg__btn cl-btn cl-btn--" + st[2], "aria-pressed": "false",
+        "aria-label": label + ": " + (st[0] === null ? "не проверялось" : st[1]),
+        text: st[1], onclick: function () {
+          session.local.checklist[id] = st[0];
+          rvRenderChecklistItem(row);
+          refresh();
+          var p = { checklist: {} };
+          p.checklist[id] = st[0];
+          rvQueue(p, "job", false);
+        } });
+    });
+    var basis = "Основание: " + [it.document_short || it.document, it.basis].filter(Boolean).join(", ");
+    var meta = el("div", { class: "cl-meta" }, [el("span", { class: "cl-basis", title: it.quote ? String(it.quote) : null, text: basis })]);
+    if (it.quote) {
+      meta.appendChild(el("details", { class: "cl-quote" }, [
+        el("summary", { text: "Текст нормы" }),
+        el("blockquote", { text: String(it.quote) })
+      ]));
+    }
+    row.node.appendChild(el("div", { class: "cl-text" }, [el("span", { class: "cl-label", text: label }), meta]));
+    row.node.appendChild(el("div", { class: "seg cl-seg", role: "group", "aria-label": label }, row.btns));
+    list.appendChild(row.node);
+    rvRenderChecklistItem(row);
   }
 
   function rvEntry(n) {
@@ -986,7 +1355,8 @@
     var data = job.review && typeof job.review === "object" ? job.review : null;
     rv = {
       jobId: String(job.job_id || state.jobId), data: data,
-      local: { decision: data ? data.decision || null : null, violations: {} },
+      local: { decision: data ? data.decision || null : null, violations: {},
+        checklist: Object.assign({}, (data && data.checklist && typeof data.checklist === "object") ? data.checklist : {}) },
       patch: {}, origins: {}, sent: {}, inflight: false, timer: null, waiters: [], items: [], ui: { ind: {} }
     };
     var dv = (data && data.violations) || {};
@@ -1066,6 +1436,10 @@
       el("label", { class: "visually-hidden", for: uid + "-dc", text: "Комментарий к решению" }),
       u.decisionComment
     ]));
+    u.checklist = el("div", { class: "rv-checklist", hidden: true });
+    panel.appendChild(u.checklist);
+    var clSession = rv;
+    getChecklist().then(function (items) { renderChecklist(clSession, u.checklist, items); });
     panel.appendChild(el("div", { class: "rv-actions" }, [
       el("div", { class: "rv-actions__main" }, [u.actBtn, u.actHint]),
       el("a", { class: "rv-export", href: API + "/feedback.jsonl", download: "feedback.jsonl",
@@ -1130,6 +1504,17 @@
   }
 
   // ---------- Video + timeline ----------
+  /** Landscape source (e.g. a different camera): wider player column, width-driven video sizing. */
+  function setLandscape(on) {
+    var g = document.querySelector(".result__grid");
+    if (g) g.classList.toggle("is-landscape", !!on);
+  }
+  video.addEventListener("loadedmetadata", function () {
+    if (video.videoWidth && video.videoHeight) {
+      video.style.aspectRatio = video.videoWidth + " / " + video.videoHeight;
+      setLandscape(video.videoWidth / video.videoHeight > 1.05);
+    }
+  });
   function effectiveDuration() {
     var d = num(video.duration);
     if (d && isFinite(d) && d > 0) return d;
@@ -1140,7 +1525,12 @@
     var markers = $("timeline-markers");
     markers.textContent = "";
     var d = effectiveDuration();
+    // The start label is the start of the recording, always 00:00 (it used to be the playhead time,
+    // which read «00:56 … 00:56» once playback had reached the end). The playhead has its own readout.
+    $("tl-start").textContent = fmtTime(0);
     $("tl-end").textContent = d ? fmtTime(d) : "—";
+    renderPlayhead();
+    renderStageStrip();
     if (!d) return;
     state.violations.forEach(function (v, i) {
       var t = startOf(v);
@@ -1172,7 +1562,12 @@
   function seekTo(t, play, noScroll) {
     var go = function () {
       pendingSeek = null;
-      try { video.currentTime = Math.max(0, t); } catch (e) { /* ignore */ }
+      // Never seek onto (or past) the end: a target beyond the real duration would leave the
+      // player parked at its last frame. Clamp to the duration known once metadata is in.
+      var d = effectiveDuration();
+      var target = Math.max(0, num(t) || 0);
+      if (d) target = Math.min(target, Math.max(0, d - 0.25));
+      try { video.currentTime = target; } catch (e) { /* ignore */ }
       if (play) { var p = video.play(); if (p && p.catch) p.catch(function () {}); }
     };
     cancelPendingSeek();
@@ -1191,6 +1586,7 @@
     cancelPendingSeek();
     try { video.pause(); } catch (e) { /* ignore */ }
     activeIdx = -1;
+    liveClear();
     document.querySelectorAll(".vcard.is-active, .marker.is-active").forEach(function (n) { n.classList.remove("is-active"); });
   }
   function canReupload() {
@@ -1210,15 +1606,26 @@
     if (m) m.classList.add("is-active");
   }
 
-  video.addEventListener("loadedmetadata", renderTimeline);
-  video.addEventListener("durationchange", renderTimeline);
-  video.addEventListener("timeupdate", function () {
+  /** Playhead bar + «текущая позиция» readout; duration from the video once finite, else video_meta. */
+  function renderPlayhead() {
     var d = effectiveDuration();
-    if (!d) return;
-    var pct = Math.max(0, Math.min(100, (video.currentTime / d) * 100));
+    var cur = num(video.currentTime) || 0;
+    if (d && cur > d) cur = d;
+    var pct = d ? Math.max(0, Math.min(100, (cur / d) * 100)) : 0;
     $("timeline-played").style.width = pct + "%";
     $("timeline-head").style.left = pct + "%";
-    $("tl-start").textContent = fmtTime(video.currentTime);
+    $("tl-cur").textContent = fmtTime(cur) + (d ? " / " + fmtTime(d) : "");
+    var end = d ? fmtTime(d) : "—";
+    if ($("tl-end").textContent !== end) $("tl-end").textContent = end;
+  }
+  video.addEventListener("loadedmetadata", renderTimeline);
+  video.addEventListener("durationchange", renderTimeline);
+  video.addEventListener("emptied", renderPlayhead);
+  video.addEventListener("seeked", renderPlayhead);
+  video.addEventListener("timeupdate", function () {
+    renderPlayhead();
+    var d = effectiveDuration();
+    if (!d) return;
     var cur = video.currentTime, found = -1;
     state.violations.forEach(function (v, i) {
       var t = startOf(v);
@@ -1239,7 +1646,8 @@
     var msg = el("div", { class: "notice notice--warn player__error", style: "margin-top:10px" }, [
       el("span", { text: "Не удалось воспроизвести видео в браузере. Кадры-доказательства и таймкоды доступны ниже." })
     ]);
-    $("video").parentNode.parentNode.insertBefore(msg, document.querySelector(".timeline-wrap"));
+    var inner = $("video").closest(".player__inner");
+    inner.insertBefore(msg, inner.querySelector(".timeline-wrap"));
   });
 
   // ---------- Lightbox ----------

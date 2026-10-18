@@ -12,12 +12,18 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field, replace
 
+from forte_detector.probes import base as probe_base
 from forte_detector.probes.base import ProbeRequest, ProbeResult
 from forte_detector.rules import taxonomy as tx
 from forte_detector.schema import Event
 
 # Cues answered by cheap CV (not counted against the VLM budget).
 CV_CUES = {"door_open", "camera_blocked"}
+BANKNOTE_CUE = "banknotes_in_hand"  # Task 3 cue (if present in CUES): same-frame veto of an ID "yes"
+
+
+def banknote_cue_available() -> bool:
+    return BANKNOTE_CUE in probe_base.CUES
 # COCO object classes (the runner's fallback when the VLM is down) are noisy on these overhead views
 # (desk phone -> "cell phone", jackets -> "handbag"): alone they stay below the verdict threshold.
 COCO_ONLY_WEIGHT = 0.25
@@ -25,13 +31,22 @@ COCO_ONLY_WEIGHT = 0.25
 # (partial corroboration, single frame, weak-cue-only) still EMITS the violation with this fact_conf
 # (x the probe's own confidence); the verdict threshold sits below it.
 WEAK_FACT = 0.45
+WEAK_CONF_FLOOR = 0.7  # a decided answer (>= min_probe_conf) counts at least this much in a weak event
+
+
+def weak_fact(conf: float) -> float:
+    """fact_conf of a weak event: WEAK_FACT x the answer's confidence, floored, so a decided "yes" at
+    conf 0.55-0.7 (no logprobs, re-encoded frames) cannot fall below the verdict threshold."""
+    return WEAK_FACT * max(float(conf or 0.0), WEAK_CONF_FLOOR)
 
 
 @dataclass(frozen=True)
 class RulesConfig:
     verdict_threshold: float = float(os.environ.get("FORTE_VERDICT_THR", "0.25"))
-    max_vlm_requests: int = int(os.environ.get("FORTE_MAX_VLM_REQ", "50"))  # first-round plan
-    max_vlm_total: int = 60  # hard cap per video incl. follow-ups (CV cues do not count)
+    # 5080 VLM (~0.5-0.8 s/call): first-round plan 70, hard cap 90 incl. staged follow-ups (the 20-call
+    # headroom is reserved for follow-ups); CV cues do not count
+    max_vlm_requests: int = int(os.environ.get("FORTE_MAX_VLM_REQ", "70"))
+    max_vlm_total: int = int(os.environ.get("FORTE_MAX_VLM_TOTAL", "90"))
     max_events: int = 3
     merge_gap_s: float = 5.0
     min_probe_conf: float = 0.5  # a True answer below this confidence is ignored
@@ -44,7 +59,22 @@ class RulesConfig:
     max_short_visits: int = 2
     max_departures: int = 3  # candidate departures (+ the end of the clip) confirmed by person count
     enable_service: bool = True  # ServiceRule (T10 cash at the body + T15 client ID check)
+    # T99 (CV-only unexplained desk access) at low fact_conf 0.3 (combined 0.27 >= threshold): measured on
+    # ea2e4ca (PC, orig + reencode) with 0 verdict changes vs 0.2, i.e. no extra FP on the clean 20
+    t99_fact: float = float(os.environ.get("FORTE_T99_FACT", "0.3"))
     t15_standalone: bool = True  # T15 without a T10 cue (team decision: missing ID is a violation)
+    # T3 fallback (X-22: the key in the lock is a few pixels, key_in_safe answers "no"): a confirmed
+    # empty-room departure with the safe zone visible gets a LOW-confidence T3 ("check the safe").
+    # t3_fallback_pyes selects the gate:
+    #   0 (default, "option B") -> UNCONDITIONAL: no p(yes) requirement. Fires whenever the safe zone is
+    #     visible, also when key_in_safe is missing / unanswered / budget-skipped (end and evidence then
+    #     use the departure time). It also fires on the clean exits X-12/23/25/27/29 (a reviewer hint).
+    #   > 0 -> the old gated behaviour: fires only when key_in_safe's VLM p(yes) >= the floor. Measured
+    #     over every orig + reencode PC run (laptop work/pc_runs): X-22 p_yes 0.002-0.0103; every other
+    #     confirmed empty departure (X-11/12/13/15/23..29) <= 0.001 -> FORTE_T3_FALLBACK_PYES=0.0015.
+    # fact 0.3 -> combined 0.285 >= the 0.25 threshold.
+    t3_fallback_fact: float = float(os.environ.get("FORTE_T3_FALLBACK_FACT", "0.3"))
+    t3_fallback_pyes: float = float(os.environ.get("FORTE_T3_FALLBACK_PYES", "0"))
 
 
 # ----------------------------------------------------------------------------- context
@@ -243,6 +273,7 @@ def people(n: int) -> str:
 class Rule:
     name = "rule"
     types: tuple[str, ...] = ()
+    can_decide_unprobed = False  # True: decide() still runs (pairs=[]) when its VLM group is over budget
 
     def propose(self, ctx: Ctx) -> list[ProbeRequest]:
         return []
@@ -315,6 +346,7 @@ class DepartureRule(Rule):
         k = by_key(pairs)
         events = []
         base_by_src = {"exit": 0.9, "empty": 0.88, "seat": 0.85, "end": 0.8}
+        hint = None  # T3 fallback at the first confirmed departure that qualifies
         for i, d in enumerate(ctx.departures):
             p = k.get(f"d{i}:count")
             if not p or count_of(p[1]) != 0:
@@ -341,7 +373,44 @@ class DepartureRule(Rule):
                     evidence=[d.timecode, d.t_exit, q[0].t], source=f"rule:departure/{d.source}:{cue}",
                     extra={"cue": cue, "probe_t": q[0].t, "departure": d.source},
                 ))
+            if hint is None:
+                hint = self._t3_hint(ctx, k, i, d)
+        if hint is not None and not any(e.type == "T3" for e in events):
+            events.append(hint)  # the strong key/safe path already covers T3: no duplicate
         return events
+
+    T3_FALLBACK_OBS = "проверьте сейф: дверца или ключ"
+
+    @staticmethod
+    def safe_visible(ctx: Ctx) -> bool:
+        return bool(ctx.cal.get("safe")) and "safe" not in (ctx.cal.get("absent") or [])
+
+    def _t3_hint(self, ctx: Ctx, k, i: int, d: Departure) -> Event | None:
+        """Low-confidence T3 at a confirmed empty-room departure with the safe zone visible (see
+        RulesConfig.t3_fallback_pyes). pyes <= 0: unconditional -- the key_in_safe answer / p_yes is not
+        required and the probe may be missing (end/evidence then use the departure time). pyes > 0: the
+        key_in_safe answer, even a "no", must carry a VLM p(yes) >= the floor; no logprobs -> no hint."""
+        if not self.safe_visible(ctx):
+            return None
+        q = k.get(f"d{i}:key_in_safe")
+        ps = [float(q[1].raw["p_yes"])] if (
+            q is not None and q[1].value is not None
+            and isinstance((q[1].raw or {}).get("p_yes"), (int, float))) else []
+        gate = ctx.cfg.t3_fallback_pyes
+        if gate > 0 and (not ps or max(ps) < gate):
+            return None
+        t = d.timecode
+        t_probe = q[0].t if q is not None else t
+        extra = {"cue": "key_in_safe", "probe_t": q[0].t if q is not None else None, "departure": d.source,
+                 "strength": "weak", "gate": "p_yes" if gate > 0 else "unconditional"}
+        if ps:
+            extra["p_yes"] = round(max(ps), 4)
+        return make_event(
+            "T3", t, ctx.cfg.t3_fallback_fact, self.T3_FALLBACK_OBS,
+            start=d.t_leave if d.t_leave is not None else t, end=t_probe,
+            evidence=[d.timecode, d.t_exit, t_probe], source=f"rule:departure/{d.source}:t3_fallback",
+            extra=extra,
+        )
 
 
 class PersistentStateRule(Rule):
@@ -350,8 +419,12 @@ class PersistentStateRule(Rule):
 
     def __init__(self, name, cue, type_id, obs, zones=(), fracs=(0.5, 0.75, 1.0), need=3, base=0.85,
                  require_cashier=False, min_conf: float | None = None, weak_need: int | None = None,
-                 weak_check=None):
+                 weak_check=None, weak_needs_anchor: bool = False, min_span_s: float = 0.0):
         self.min_conf = min_conf
+        # desk cues: a single weak hit counts only when the desk ROI is anchored on the cash equipment
+        # (laptop / counting machine), not a fallback that may swallow customer counters (external2)
+        self.weak_needs_anchor = weak_needs_anchor
+        self.min_span_s = min_span_s  # strong path: hits must span >= this (separate moments)
         self.weak_check = weak_check  # optional (ctx, request) -> bool that every weak hit must pass
         self.weak_need = weak_need  # fewer hits than `need` but >= weak_need -> weak event (WEAK_FACT)
         self.name, self.cue, self.type_id, self.obs = name, cue, type_id, obs
@@ -371,12 +444,15 @@ class PersistentStateRule(Rule):
         need = min(self.need, planned)  # missing (capped) probes never lower the bar
         if not hits:
             return []
-        if len(hits) >= need:
+        span_ok = len(hits) < 2 or hits[-1][0].t - hits[0][0].t >= self.min_span_s
+        if len(hits) >= need and span_ok:
             conf = self.base * min(r.conf for _, r in hits) * (len(hits) / max(1, planned)) ** 0.5
             strength = "strong"
+        elif self.weak_needs_anchor and not desk_anchored(ctx):
+            return []
         elif (self.weak_need is not None and len(hits) >= self.weak_need
               and (self.weak_check is None or all(self.weak_check(ctx, q) for q, _ in hits))):
-            conf = WEAK_FACT * min(r.conf for _, r in hits)
+            conf = weak_fact(min(r.conf for _, r in hits))
             strength = "weak"
         else:
             return []
@@ -459,7 +535,7 @@ class DoorRule(Rule):
                 return []
             q, r = hits[0]
             t5 = self._t5(ctx, hits)
-            return [make_event("T5", t5, WEAK_FACT * r.conf, f"кассир у рабочего места с {mm(t5)}, дверь открыта на "
+            return [make_event("T5", t5, weak_fact(r.conf), f"кассир у рабочего места с {mm(t5)}, дверь открыта на "
                                f"{mm(q.t)} (одна проверка)", start=t5, end=q.t, evidence=[t5, q.t],
                                source="rule:door:door_open/weak", extra={"hits": 1, "probes": len(door),
                                                                           "strength": "weak"})]
@@ -548,7 +624,7 @@ class ClientChangeRule(Rule):
             if kind == "seq":
                 if left:
                     # >= 2 agreeing probes (or before + after the change) = persistent; 1 = weak
-                    fact = (0.85 if (n_post >= 2 or spans) else WEAK_FACT) * left[1].conf
+                    fact = 0.85 * left[1].conf if (n_post >= 2 or spans) else weak_fact(left[1].conf)
                     events.append(make_event(
                         "T2", ctx.clip(b.start + 1.0), fact,
                         f"следующий посетитель вошёл в {mm(b.start)}, {what}",
@@ -576,6 +652,79 @@ class ClientChangeRule(Rule):
                     f"{what}", start=b.start, end=min(a.end, b.end), evidence=[b.start, t, left[0].t],
                     source=f"rule:client_change/par:{left[0].cue}", extra={"prev": a.track_id, "next": b.track_id}))
         return events
+
+
+class CrowdRule(Rule):
+    """Weak T6 from perception: >= 3 person-sized people inside the room (not behind the glass) for
+    >= 3 s during a visit. The VLM person count undercounts crowds (answers 0-2 on the external
+    intruder clips), so it only vetoes: an answer <= 1 drops the event, None / >= 2 keeps it weak,
+    >= 3 makes it medium. Person-sized = box height >= 0.6 x the cashier's median height (arm
+    fragments and far reflections do not count)."""
+
+    name = "crowd"
+    types = ("T6",)
+    MIN_RUN_S = 3.0
+    REL_H = 0.6
+    can_decide_unprobed = True  # over the VLM budget -> weak perception-only event
+
+    def run_(self, ctx: Ctx) -> tuple[float, float, int, float] | None:
+        s = ctx.tl.get("series", {})
+        ts, rows = s.get("t") or [], s.get("persons") or []
+        if not ts or len(rows) != len(ts):
+            return None
+
+        def h(b):
+            return b[3] - b[1]
+
+        def inside(r):
+            return len(r) < 4 or not r[3]
+
+        ch = sorted(h(r[2]) for row in rows for r in row if r[1] == "cashier" and inside(r))
+        if not ch:  # no cashier track: the in-room people's median height is the size reference
+            ch = sorted(h(r[2]) for row in rows for r in row if inside(r))
+        if not ch:
+            return None
+        ref = ch[len(ch) // 2]
+        counts = [sum(1 for r in row if inside(r) and h(r[2]) >= self.REL_H * ref) for row in rows]
+        best, start = None, None
+        for i, (t, n) in enumerate(zip(ts, counts)):
+            if n >= 3 and start is None:
+                start = i
+            if (n < 3 or i == len(ts) - 1) and start is not None:
+                end = i if n >= 3 else i - 1
+                if ts[end] - ts[start] >= self.MIN_RUN_S:
+                    j = max(range(start, end + 1), key=lambda q: counts[q])
+                    if best is None or ts[end] - ts[start] > best[1] - best[0]:
+                        best = (ts[start], ts[end], counts[j], ts[j])
+                start = None
+        return best
+
+    def propose(self, ctx):
+        r = self.run_(ctx)
+        if r is None:
+            return []
+        return [req(self.name, "person_count", ctx.clip(r[3]), "crowd:count")]  # the peak frame
+
+    def decide(self, ctx, pairs):
+        r = self.run_(ctx)
+        if r is None:
+            return []
+        a, b, peak, t_peak = r
+        p = by_key(pairs).get("crowd:count")
+        n = count_of(p[1]) if p else None
+        conf = p[1].conf if p else 0.0
+        if n is not None and (n == 0 or (n == 1 and conf >= 0.8)):
+            return []  # the VLM confidently sees (almost) nobody at the peak: perception phantoms
+        weak = weak_fact(conf if p else WEAK_CONF_FLOOR)
+        if n is not None and n >= 3 and conf >= ctx.cfg.min_probe_conf:
+            fact, strength = max(0.6 * conf, weak), "medium"
+        else:
+            fact, strength = weak, "weak"
+        t = p[0].t if p else round(t_peak, 2)
+        return [make_event("T6", round(a, 2), fact, f"по трекингу в помещении {people(peak)} одновременно с "
+                           f"{mm(a)} по {mm(b)}", start=a, end=b, evidence=[round(a, 2), t],
+                           source="rule:crowd:perception_count",
+                           extra={"strength": strength, "vlm_count": n, "peak": peak})]
 
 
 class VisitExitRule(Rule):
@@ -608,6 +757,7 @@ class VisitExitRule(Rule):
             t_mid = (v.start + v.end) / 2 if v.dwell <= ctx.cfg.short_visit_max_s else v.end - 3.0
             out += [req(self.name, "person_count", ctx.clip(t_mid), f"{i}:mid"),
                     req(self.name, "person_count", ta, f"{i}:after"),
+                    req(self.name, "person_count", ctx.clip(v.end + 3.5), f"{i}:after:2"),
                     req(self.name, "counting_machine_used", ta, f"{i}:machine",
                         extra_ts=[ctx.clip(ta + 1.0), ctx.clip(ta + 2.0)]),
                     req(self.name, "counting_machine_used", ctx.clip(v.end - 2.0), f"{i}:machine:leaving",
@@ -620,7 +770,10 @@ class VisitExitRule(Rule):
         k = by_key(pairs)
         events = []
         for i, v in enumerate(self.visits(ctx)):
-            mid, after = k.get(f"{i}:mid"), k.get(f"{i}:after")
+            mid = k.get(f"{i}:mid")
+            afters = [p for p in (k.get(f"{i}:after"), k.get(f"{i}:after:2")) if p and count_of(p[1]) is not None]
+            # perception's exit can lag or lead the door by 1-2 s: the visitor is gone if either look says so
+            after = min(afters, key=lambda p: count_of(p[1])) if afters else None
             n_mid = count_of(mid[1]) if mid else None
             n_after = count_of(after[1]) if after else None
             if n_mid is None or n_mid < 2 or n_after is None or n_after > 1:
@@ -630,11 +783,11 @@ class VisitExitRule(Rule):
             leaving = k.get(f"{i}:machine:leaving")
             if not (mach and is_true(mach[1], ctx.cfg.min_probe_conf)) and leaving and is_true(leaving[1], 0.5):
                 # the count runs while the client walks out (perception's exit can lag the door)
-                base = WEAK_FACT / max(leaving[1].conf, 1e-6)  # -> fact = WEAK_FACT (one conf factor)
+                base = weak_fact(leaving[1].conf) / max(leaving[1].conf, 1e-6)  # one conf factor
                 mach = leaving
             if mach and is_true(mach[1], ctx.cfg.min_probe_conf):
                 events.append(make_event(
-                    "T7", v.end, base * mach[1].conf, (f"клиент уходит, счётная машина работает на {mm(mach[0].t)}" if mach is leaving else f"после ухода клиента счётная машина работает на {mm(mach[0].t)}"), start=v.start, end=mach[0].t, evidence=[mid[0].t, v.end, mach[0].t],
+                    "T7", v.end, max(base * mach[1].conf, weak_fact(mach[1].conf)), (f"клиент уходит, счётная машина работает на {mm(mach[0].t)}" if mach is leaving else f"после ухода клиента счётная машина работает на {mm(mach[0].t)}"), start=v.start, end=mach[0].t, evidence=[mid[0].t, v.end, mach[0].t],
                     source="rule:visit_exit:counting_machine_used", extra={"dwell": round(v.dwell, 1), "strength": "weak" if mach is leaving else "strong"}))
             elif bag and is_true(bag[1], ctx.cfg.min_probe_conf):
                 t = round((v.start + v.end) / 2, 2)
@@ -681,7 +834,9 @@ class ServiceRule(Rule):
     @staticmethod
     def id_window(v: Visit) -> tuple[float, float]:
         accept = v.at_desk_t if v.at_desk_t is not None and v.at_desk_t > v.start + 2.0 else v.start + 0.35 * v.dwell
-        return v.start + 0.5, min(v.end, accept + 1.5)
+        # the ID check precedes cash acceptance by a few seconds after the client sits (X-5: ID 8-12 s
+        # after reaching the desk at 7.3 s): the window runs to arrival + 4 s
+        return v.start + 0.5, min(v.end, accept + 4.0)
 
     def propose(self, ctx):
         if not ctx.cfg.enable_service:
@@ -694,19 +849,48 @@ class ServiceRule(Rule):
             w = (b - a) / 6
             out += [req(self.name, "person_count", ctx.clip(s + 0.5 * d), f"{i}:count"),
                     req(self.name, "bag_on_desk", ctx.clip(s + 0.35 * d), f"{i}:bag"),
-                    req(self.name, "bag_on_desk", ctx.clip(s + 0.7 * d), f"{i}:bag:2"),
-                    # an "ID" answer while banknotes are being handed over is the banknotes
-                    req(self.name, "cash_on_desk", ctx.clip(a + 4 * w), f"{i}:cash_at_id"),
-                    req(self.name, "cash_on_desk", ctx.clip(b), f"{i}:cash_at_id:2"),
-                    req(self.name, "id_document_shown", ctx.clip(a + w), f"{i}:id:0",
-                        extra_ts=[ctx.clip(a + 2 * w), ctx.clip(a + 3 * w)]),
-                    req(self.name, "id_document_shown", ctx.clip(a + 4 * w), f"{i}:id:1",
-                        extra_ts=[ctx.clip(a + 5 * w), ctx.clip(b)])]
+                    req(self.name, "bag_on_desk", ctx.clip(s + 0.7 * d), f"{i}:bag:2")]
+            # one ID question per frame over the whole window, so every "yes" can be checked against
+            # banknotes at the SAME frame (staged follow-up: cash_on_desk + banknotes_in_hand)
+            out += [req(self.name, "id_document_shown", t, f"{i}:id@{j}") for j, t in enumerate(self.id_ts(ctx, v))]
+            if not ctx.staged:
+                out += [r for j, t in enumerate(self.id_ts(ctx, v)) for r in self.veto_reqs(i, j, t)]
             if v is longest:
                 out += [req(self.name, "cash_in_hand_to_body", ctx.clip(s + 0.6 * d), f"{i}:hand",
                             extra_ts=[ctx.clip(s + 0.75 * d), ctx.clip(s + 0.9 * d)]),
                         req(self.name, "cash_in_hand_to_body", ctx.clip(s + 0.3 * d), f"{i}:hand:2",
-                            extra_ts=[ctx.clip(s + 0.4 * d), ctx.clip(s + 0.5 * d)])]
+                            extra_ts=[ctx.clip(s + 0.4 * d), ctx.clip(s + 0.5 * d)]),
+                        # third, offset window over the hand-count / machine-loading phase: the cue is
+                        # subtle and answers vary run to run (X-2: 0.77 yes vs 0.53 no on the same frames)
+                        req(self.name, "cash_in_hand_to_body", ctx.clip(s + 0.5 * d), f"{i}:hand:3",
+                            extra_ts=[ctx.clip(s + 0.65 * d), ctx.clip(s + 0.8 * d)])]
+        return out
+
+    def id_ts(self, ctx: Ctx, v: Visit) -> list[float]:
+        a, b = self.id_window(v)
+        w = (b - a) / 6
+        return [ctx.clip(a + n * w) for n in range(1, 6)] + [ctx.clip(b)]
+
+    def late_ts(self, ctx: Ctx, v: Visit) -> list[float]:  # the last 3 ID frames (kept for callers/tests)
+        return self.id_ts(ctx, v)[3:]
+
+    def veto_reqs(self, i: int, j: int, t: float) -> list[ProbeRequest]:
+        out = [req(self.name, "cash_on_desk", t, f"{i}:cash@{j}")]
+        if banknote_cue_available():
+            out.append(req(self.name, BANKNOTE_CUE, t, f"{i}:notes@{j}"))
+        return out
+
+    def followup(self, ctx, pairs):
+        """Banknote checks only where an ID frame said "yes" (same timestamp)."""
+        if not ctx.staged:
+            return []
+        k = by_key(pairs)
+        out = []
+        for i, v in enumerate(self.visits(ctx)):
+            for j, t in enumerate(self.id_ts(ctx, v)):
+                p = k.get(f"{i}:id@{j}")
+                if p is not None and p[1].value is True:
+                    out += self.veto_reqs(i, j, t)
         return out
 
     def decide(self, ctx, pairs):
@@ -719,19 +903,38 @@ class ServiceRule(Rule):
                 continue  # no real client in the room
             bags = [k.get(f"{i}:bag"), k.get(f"{i}:bag:2")]
             collector = any(p is not None and is_true(p[1], ctx.cfg.min_probe_conf) for p in bags)
-            ids = [k.get(f"{i}:id:0"), k.get(f"{i}:id:1")]
+            frames = [k.get(f"{i}:id@{j}") for j in range(6)]
 
             def said_no(p):
                 return p is not None and p[1].value is False and p[1].conf >= 0.7
 
-            cash_at_id = any(p is not None and is_true(p[1], ctx.cfg.min_probe_conf)
-                             for p in (k.get(f"{i}:cash_at_id"), k.get(f"{i}:cash_at_id:2")))
-            id_was_cash = (ids[1] is not None and ids[1][1].value is True and cash_at_id)
-            no_id = said_no(ids[0]) and (said_no(ids[1]) or id_was_cash)
-            hands = [k[x] for x in (f"{i}:hand", f"{i}:hand:2") if x in k and is_true(k[x][1], 0.75)]
-            weak_hands = [k[x] for x in (f"{i}:hand", f"{i}:hand:2") if x in k and is_true(k[x][1], 0.5)]
+            # an "ID" frame is vetoed as banknotes ONLY if cash_on_desk or banknotes_in_hand says yes at
+            # that same frame; every frame must be a "no" (clear or unsure) or a vetoed "yes" (a real ID anywhere
+            # wins); at least two clear "no"s are required
+            vetoed = []
+            n_no = sum(said_no(p) for p in frames)
+            all_ok = all(p is not None for p in frames) and n_no >= 2
+            for j, p in enumerate(frames):
+                if p is None or said_no(p) or p[1].value is False:  # an unsure "no" is still not a document
+                    continue
+                if p[1].value is True and p[1].conf < 0.7:
+                    # an unsure "yes" next to clear "no"s (X-19: 0.63 during the banknote hand-over) is
+                    # not a shown document; the resulting T15 stays weak
+                    vetoed.append(j)
+                    continue
+                notes = [k.get(f"{i}:cash@{j}"), k.get(f"{i}:notes@{j}")]
+                if p[1].value is True and any(x is not None and is_true(x[1], ctx.cfg.min_probe_conf) for x in notes):
+                    vetoed.append(j)
+                    continue
+                all_ok = False
+            id_was_cash = bool(vetoed)
+            no_id = all_ok
+            ids = [p for p in frames if p is not None]
+            hand_keys = (f"{i}:hand", f"{i}:hand:2", f"{i}:hand:3")
+            hands = [k[x] for x in hand_keys if x in k and is_true(k[x][1], 0.75)]
+            weak_hands = [k[x] for x in hand_keys if x in k and is_true(k[x][1], 0.5)]
             if v is longest and not collector:
-                if hands and (no_id or len(hands) == 2):
+                if hands and (no_id or len(hands) >= 2):
                     q, r = hands[0]
                     events.append(make_event(
                         "T10", q.t, 0.6 * r.conf, "кассир удерживает часть наличных у корпуса во время обслуживания "
@@ -741,7 +944,7 @@ class ServiceRule(Rule):
                 elif weak_hands:
                     q, r = weak_hands[0]
                     events.append(make_event(
-                        "T10", q.t, WEAK_FACT * r.conf, "кассир удерживает часть наличных у корпуса во время "
+                        "T10", q.t, weak_fact(r.conf), "кассир удерживает часть наличных у корпуса во время "
                         "обслуживания клиента (слабый признак)", start=max(v.start, q.t - 2.0),
                         end=max(q.extra_ts or [q.t]) + 0.5, evidence=[q.t] + list(q.extra_ts),
                         source="rule:service:cash_in_hand_to_body/weak", extra={"strength": "weak"}))
@@ -752,25 +955,25 @@ class ServiceRule(Rule):
             # a client already present at the clip start may have shown the ID before the recording:
             # that lowers fact_conf, it does not drop the event (recall-first)
             at_start = v.start <= 0.5
-            level = 0.55 if (said_no(ids[1]) and not at_start) else WEAK_FACT
-            conf = level * min(p[1].conf for p in ids)
+            strong15 = not id_was_cash and not at_start  # the veto-only route is capped at weak
+            conf = 0.55 * min(p[1].conf for p in ids) if strong15 else weak_fact(min(p[1].conf for p in ids))
             events.append(make_event(
                 "T15", t15, conf, f"посетитель у стола с {mm(v.start)}, на кадрах {mm(a)}–{mm(b)} карточка "
-                "или паспорт не видны", start=v.start, end=b, evidence=[t15, ids[0][0].t, ids[1][0].t],
+                "или паспорт не видны", start=v.start, end=b, evidence=[t15, ids[0][0].t, ids[-1][0].t],
                 source="rule:service:id_document_shown",
                 extra={"procedure": "client_deposit", "id_window": [round(a, 2), round(b, 2)], "visit": i,
-                       "client_at_clip_start": at_start, "id_answer_was_banknotes": id_was_cash}))
+                       "client_at_clip_start": at_start, "id_answer_was_banknotes": id_was_cash,
+                       "vetoed_id_frames": [self.id_ts(ctx, v)[j] for j in vetoed]}))
         return events
 
 
 class UnexplainedAccessRule(Rule):
     """T99 (binding policy: no free VLM pass): a concrete CV anomaly no typed rule explains — a
-    non-cashier track reaches the cashier's desk while the cashier is absent. Low fact_conf by
-    design (below the verdict threshold): it is shown for review but never flips a verdict alone."""
+    non-cashier track reaches the cashier's desk while the cashier is absent. Low fact_conf
+    (RulesConfig.t99_fact, 0.3): it counts as a violation for review (recall-first; 0 extra FP measured)."""
 
     name = "unexplained_access"
     types = ("T99",)
-    FACT_CONF = 0.2  # combined ~0.18 < verdict threshold 0.25: never flips a verdict alone
 
     def decide(self, ctx, pairs):
         s = ctx.tl.get("series", {})
@@ -780,7 +983,7 @@ class UnexplainedAccessRule(Rule):
         for c in ctx.cp("visitor_arrives_at_desk"):
             near = [present[i] for i, t in enumerate(ts) if abs(t - c["t"]) <= 1.0]
             if near and all(x is False for x in near):  # None = unknown, not absent
-                return [make_event("T99", c["t"], self.FACT_CONF, "посетитель подошёл к рабочему месту кассира, "
+                return [make_event("T99", c["t"], ctx.cfg.t99_fact, "посетитель подошёл к рабочему месту кассира, "
                                    "когда кассира в помещении не было", start=c["t"], end=c["t"] + 2.0,
                                    evidence=[c["t"]], source="rule:unexplained_access:cv",
                                    extra={"track_ids": c["track_ids"]})]
@@ -788,24 +991,60 @@ class UnexplainedAccessRule(Rule):
 
 
 class CameraRule(Rule):
-    """T14: camera blocked / dark on >= 2 consecutive CV probes (5 evenly spaced)."""
+    """T14: camera blocked for >= MIN_S on a dense grid of CV probes (one per STEP_S, at most
+    MAX_PROBES per clip; the runner answers them all from one sequential low-res
+    decode pass, cheap.camera_blocked_series). One unblocked sample inside a run is tolerated
+    (flicker of a hand / spray); a pass-by (< 1 s) can never span MIN_S. Onset = first blocked
+    sample of the run."""
 
     name = "camera"
     types = ("T14",)
+    STEP_S, MAX_PROBES, MIN_S, MAX_DROPOUT = 1.0, 120, 2.0, 1
 
     def propose(self, ctx):
-        return [req(self.name, "camera_blocked", ctx.frac(f), f"cam:{i}")
-                for i, f in enumerate((0.1, 0.3, 0.5, 0.7, 0.9))]
+        step = max(self.STEP_S, ctx.duration / self.MAX_PROBES)
+        n = int(ctx.duration / step)
+        ts = sorted({ctx.clip(k * step) for k in range(1, n + 1)})
+        return [req(self.name, "camera_blocked", t, f"cam:{i}") for i, t in enumerate(ts)]
 
     def decide(self, ctx, pairs):
-        flags = [is_true(r, 0.6) for _, r in pairs]
-        for i in range(len(flags) - 1):
-            if flags[i] and flags[i + 1]:
-                q, r = pairs[i]
-                return [make_event("T14", q.t, 0.8 * r.conf, f"на {mm(q.t)} и {mm(pairs[i + 1][0].t)} подряд, "
-                                   "по проверке яркости и деталей кадра", start=q.t, end=pairs[i + 1][0].t,
-                                   evidence=[q.t, pairs[i + 1][0].t], source="rule:camera:camera_blocked")]
-        return []
+        runs, cur, drop = [], [], 0
+        for q, r in pairs:
+            if is_true(r, 0.6):
+                cur.append((q, r))
+                drop = 0
+            elif cur:
+                drop += 1
+                if drop > self.MAX_DROPOUT:
+                    runs.append(cur)
+                    cur, drop = [], 0
+        if cur:
+            runs.append(cur)
+        out = []
+        for run_ in runs:
+            t0, t1 = run_[0][0].t, run_[-1][0].t
+            # distinct frames actually judged (past the deadline several probes share one sample)
+            seen = sorted({float((r.raw or {}).get("sample_t", q.t)) for q, r in run_})
+            if len(seen) < 2 or seen[-1] - seen[0] < self.MIN_S - 1e-6:
+                continue
+            conf = 0.8 * sum(r.conf for _, r in run_) / len(run_)
+            # judged without a reference (no structured view yet: covered from the start of the clip)
+            from_start = (run_[0][1].raw or {}).get("mode") == "absolute"
+            what = ("изображение с камеры перекрыто с начала записи" if from_start else
+                    "сцена не видна (структура кадра пропала по сравнению с началом записи)")
+            out.append(make_event("T14", t0, conf, f"с {mm(t0)} по {mm(t1)}: {what}", start=t0, end=t1,
+                                  evidence=[t0, run_[len(run_) // 2][0].t, t1], source="rule:camera:camera_blocked",
+                                  extra={"blocked_probes": len(run_), "from_start": from_start}))
+        return out
+
+
+DESK_ANCHOR_SOURCES = ("laptop+counting_machine", "laptop", "counting_machine")
+
+
+def desk_anchored(ctx: Ctx) -> bool:
+    """Whether the calibrated desk ROI is anchored on the cash equipment (Task 3 desk_roi source)."""
+    src = ((ctx.cal or {}).get("meta") or {}).get("desk_source")
+    return src in DESK_ANCHOR_SOURCES
 
 
 def phone_in_hand(ctx: Ctx, q: ProbeRequest, window: float = 1.0, min_score: float = 0.3) -> bool:
@@ -827,6 +1066,140 @@ def phone_in_hand(ctx: Ctx, q: ProbeRequest, window: float = 1.0, min_score: flo
     return False
 
 
+def coco_phone_at(ctx: Ctx, t: float, roi, window: float = 1.0, min_score: float = 0.3) -> bool:
+    """A COCO 'cell phone' box (+-window s of t) whose centre lies inside roi (None = anywhere)."""
+    s = ctx.tl.get("series", {})
+    ts, objs = s.get("t") or [], s.get("objects") or []
+    eps = 1e-6
+    for i, ti in enumerate(ts):
+        if abs(ti - t) > window or i >= len(objs):
+            continue
+        for o in objs[i]:
+            if o[0] != "cell phone" or o[5] < min_score:
+                continue
+            cx, cy = (o[1] + o[3]) / 2, (o[2] + o[4]) / 2
+            if roi is None or (roi[0] - eps <= cx <= roi[2] + eps and roi[1] - eps <= cy <= roi[3] + eps):
+                return True
+    return False
+
+
+class PhoneRule(Rule):
+    """T13: the cashier holds a mobile phone, or one lies on the desk. At N checkpoints spread over the
+    clip (~every 9 s, 3-6 of them) one narrow VLM question per crop: the PERSON crop of the cashier
+    track ("is this person holding a mobile phone?") and the desk crop ("is a phone lying on the
+    desk?"); close-ups (no desk ROI / one covering >= half the frame) ask the desk question on 2x2
+    zoomed tiles (a moment is positive when any tile is).
+
+    Fires per crop kind on a persistent answer, not on scattered hits: cashier >= 2 positive moments
+    and >= 2/3 of the cashier looks; desk >= 3 positive moments and every desk look positive. On the 42
+    training clips the 4B VLM says "phone" on 14 % of cashier and 18 % of visitor crops of clean clips
+    (scattered; X-5/X-48: a CLIENT really holds a phone, labelled clean), while the phone clips answer
+    yes at almost every checkpoint. Visitors are not asked: the rule is about staff (a client's phone
+    is no violation in the training labels). COCO 'cell phone' boxes in the crop only raise the
+    confidence (never required). Timecode = first positive moment."""
+
+    name = "phone"
+    types = ("T13",)
+    MAX_REQ, MIN_CONF, MEDIUM_CONF = 12, 0.6, 0.8
+    STEP_S, MIN_CP, MAX_CP = 9.0, 3, 6
+    CASHIER_FRAC, DESK_MIN = 2 / 3, 3
+    LARGE_DESK = 0.5
+    TILES = ((0.0, 0.0, 0.6, 0.6), (0.4, 0.0, 1.0, 0.6), (0.0, 0.4, 0.6, 1.0), (0.4, 0.4, 1.0, 1.0))
+    REL_H = 0.5  # cashier crop: box height >= this x the cashier's median height ...
+    MIN_H = 0.1  # ... and >= this share of the frame height (X-14: 0.05-high reflections -> "phone")
+
+    def checkpoints(self, ctx: Ctx) -> list[float]:
+        import math
+
+        n = max(self.MIN_CP, min(self.MAX_CP, math.ceil(ctx.duration / self.STEP_S)))
+        return sorted({ctx.clip(min((k + 0.5) * ctx.duration / n, ctx.duration - 0.5)) for k in range(n)})
+
+    def _cashier(self, ctx: Ctx, t: float) -> tuple[int, list[float]] | None:
+        """(track id, box) of the tallest in-room cashier box at the sample nearest to t."""
+        s = ctx.tl.get("series", {})
+        ts, rows = s.get("t") or [], s.get("persons") or []
+        if not ts or not rows:
+            return None
+        i = min(range(min(len(ts), len(rows))), key=lambda j: abs(ts[j] - t))
+        if abs(ts[i] - t) > 1.0:
+            return None
+
+        def h(b):
+            return b[3] - b[1]
+
+        def ok(r):
+            return len(r) > 2 and r[1] == "cashier" and (len(r) < 4 or not r[3])
+
+        ref = sorted(h(r[2]) for row in rows for r in row if ok(r))
+        if not ref:
+            return None
+        min_h = max(self.MIN_H, self.REL_H * ref[len(ref) // 2])
+        cand = [r for r in rows[i] if ok(r) and h(r[2]) >= min_h]
+        if not cand:
+            return None
+        r = max(cand, key=lambda r: h(r[2]))
+        return int(r[0]), list(r[2])
+
+    def _desk(self, ctx: Ctx, t: float, k) -> list[ProbeRequest]:
+        desk = (ctx.cal or {}).get("desk")
+        if desk is not None and _area(desk) < self.LARGE_DESK:
+            return [req(self.name, "phone_on_desk", t, f"phone:{k}:desk", who="desk")]
+        return [req(self.name, "phone_on_desk", t, f"phone:{k}:desk{i}", roi=tile, who="desk")
+                for i, tile in enumerate(self.TILES)]
+
+    def propose(self, ctx):
+        per_cp = []
+        for k, t in enumerate(self.checkpoints(ctx)):
+            c = self._cashier(ctx, t)
+            crops = [req(self.name, "phone_held", t, f"phone:{k}:cashier:{c[0]}", roi=c[1], who="cashier")] if c else []
+            per_cp.append(crops + self._desk(ctx, t, k))
+        out = []
+        for r in range(max((len(c) for c in per_cp), default=0)):  # round-robin over checkpoints
+            out += [c[r] for c in per_cp if r < len(c)]
+        return out[: self.MAX_REQ]
+
+    def decide(self, ctx, pairs):
+        groups = []  # per crop kind: (who, looked moments, hit pairs)
+        for who in ("cashier", "desk"):
+            ps = [(q, r) for q, r in pairs if q.context.get("who") == who and r.value is not None]
+            looked = {q.t for q, _ in ps}
+            hits = sorted(((q, r) for q, r in ps if is_true(r, self.MIN_CONF) and r.source != "coco"),
+                          key=lambda p: p[0].t)
+            moments = {q.t for q, _ in hits}
+            if who == "cashier":
+                ok = len(moments) >= 2 and len(moments) >= self.CASHIER_FRAC * len(looked)
+            else:
+                ok = len(moments) >= self.DESK_MIN and moments == looked
+            if ok:
+                groups.append((who, looked, hits))
+        if not groups:
+            return []
+        hits = sorted((p for _, _, hs in groups for p in hs), key=lambda p: p[0].t)
+        moments = sorted({q.t for q, _ in hits})
+        confs = [r.conf for _, r in hits]
+        if len(moments) >= 3 or min(confs) >= self.MEDIUM_CONF:
+            fact, strength = 0.75 * sum(confs) / len(confs), "medium"
+        else:
+            fact, strength = weak_fact(min(confs)), "weak"
+        desk = (ctx.cal or {}).get("desk")
+        coco = any(coco_phone_at(ctx, q.t, q.roi if q.cue == "phone_held" else (q.roi or desk)) for q, _ in hits)
+        if coco:  # CV corroboration only raises the confidence
+            fact = min(1.0, fact + 0.1)
+        q0 = hits[0][0]
+        who = q0.context.get("who")
+        obs = {"cashier": "кассир держит мобильный телефон",
+               "desk": "на столе лежит мобильный телефон"}.get(who, "виден мобильный телефон")
+        return [make_event("T13", q0.t, fact, obs, start=q0.t, end=hits[-1][0].t,
+                           evidence=moments, source=f"rule:phone:{q0.cue}",
+                           extra={"cue": q0.cue, "who": who, "kinds": [g[0] for g in groups], "hits": len(hits),
+                                  "moments": len(moments), "probes": len(pairs), "strength": strength,
+                                  "coco": coco})]
+
+
+def _area(b) -> float:
+    return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+
 def default_rules() -> list[Rule]:
     """Rules in priority order (the VLM budget is spent in this order)."""
     return [
@@ -837,14 +1210,16 @@ def default_rules() -> list[Rule]:
                             zones=("safe",), need=3, base=0.85, weak_need=2),
         ClientChangeRule(),
         VisitExitRule(),
+        ServiceRule(),  # T15 (team decision) / T10: ahead of the desk-object cues in the VLM budget
+        CrowdRule(),  # weak T6 from a sustained perception crowd (1 VLM count as veto)
         PersistentStateRule("belongings", "handbag_or_coat_on_desk", "T11", "видны на столе на {times}",
-                            zones=("desk",), fracs=(0.5, 0.8, 1.0), need=2, base=0.85, weak_need=1),
+                            zones=("desk",), fracs=(0.5, 0.8, 1.0), need=2, base=0.85, weak_need=1,
+                            weak_needs_anchor=True, min_span_s=3.0),
         PersistentStateRule("food", "cup_or_food", "T12", "видны на {times}",
-                            zones=("desk",), fracs=(0.45, 0.7, 0.95), need=2, base=0.85, weak_need=1),
+                            zones=("desk",), fracs=(0.45, 0.7, 0.95), need=2, base=0.85, weak_need=1,
+                            weak_needs_anchor=True, min_span_s=3.0),
         CameraRule(),
-        PersistentStateRule("phone", "phone_visible", "T13", "виден на {times}", fracs=(0.4, 0.7, 0.95),
-                            need=3, base=0.75, min_conf=0.8, weak_need=2, weak_check=phone_in_hand),
-        ServiceRule(),
+        PhoneRule(),
         UnexplainedAccessRule(),
     ]
 
@@ -865,6 +1240,8 @@ def plan(ctx: Ctx, rules: list[Rule] | None = None) -> list[PlanItem]:
         reqs = rule.propose(ctx)
         n_vlm = sum(r.cue not in CV_CUES for r in reqs)
         if n_vlm and used + n_vlm > ctx.cfg.max_vlm_requests:
+            if rule.can_decide_unprobed:
+                items.append(PlanItem(rule, [r for r in reqs if r.cue in CV_CUES]))
             continue
         used += n_vlm
         items.append(PlanItem(rule, reqs))

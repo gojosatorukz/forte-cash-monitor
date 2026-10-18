@@ -813,6 +813,125 @@
 ]
 },
 {
+"cue": "banknotes_in_hand",
+"vid": "X-19",
+"t": 7.0,
+"expected": true,
+"note": "client hands over banknotes (B)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-35",
+"t": 6.5,
+"expected": true,
+"note": "client hands banknotes over the desk (D)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-37",
+"t": 7.5,
+"expected": true,
+"note": "client puts cash on desk from hand (D)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-39",
+"t": 6.5,
+"expected": true,
+"note": "client hands over cash (D)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-2",
+"t": 9.0,
+"expected": true,
+"note": "notes put down / cashier fans notes by hand (A)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-2",
+"t": 10.5,
+"expected": true,
+"note": "notes put down / cashier fans notes by hand (A)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-38",
+"t": 6.5,
+"expected": true,
+"note": "client hands over cash (D)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-1",
+"t": 10.0,
+"expected": true,
+"note": "notes passed hand to hand / hand count (A)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-1",
+"t": 12.0,
+"expected": true,
+"note": "notes passed hand to hand / hand count (A)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-1",
+"t": 5.5,
+"expected": false,
+"note": "client hands over the white ID card (A)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-4",
+"t": 12.0,
+"expected": false,
+"note": "client 1 hands over the ID (A)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-5",
+"t": 10.0,
+"expected": false,
+"note": "ID handed over and checked (A)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-3",
+"t": 8.0,
+"expected": false,
+"note": "cashier holds the ID up (A)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-16",
+"t": 9.0,
+"expected": false,
+"note": "collector hands a white card (B)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-28",
+"t": 3.0,
+"expected": false,
+"note": "typing on the laptop (C)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-22",
+"t": 2.0,
+"expected": false,
+"note": "typing on the laptop (B)"
+},
+{
+"cue": "banknotes_in_hand",
+"vid": "X-29",
+"t": 15.0,
+"expected": false,
+"note": "empty room (C)"
+},
+{
 "cue": "counting_machine_used",
 "vid": "X-1",
 "t": 17.0,

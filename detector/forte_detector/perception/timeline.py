@@ -20,24 +20,38 @@ class TimelineParams:
     edge_s: float = 0.5  # births/deaths within this of the video start/end are not entries/exits
     stationary_disp: float = 0.1  # visitor "stopped": centre moves < this x box diag per second
     min_stationary_s: float = 2.0  # min stationary presence for a cashier seat
-    visitor_seat_dist: float = 1.0  # a non-cashier track must come within this x seat diag of the seat
-    min_visitor_s: float = 1.0  # ... and last at least this long; otherwise it is "background"
+    # background (not counted) needs positive evidence; see _background_reason
+    min_visitor_s: float = 1.0  # shorter non-cashier tracks are background (fragments)
+    visitor_seat_dist: float = 1.0  # beyond this x seat diag from the seat a track is "far" ...
+    visitor_far_rel_h: float = 0.85  # ... and background only when also smaller than this x cashier's
     visitor_min_rel_h: float = 0.6  # median box height >= this x cashier's (smaller = far behind glass)
     visitor_static_rel_h: float = 0.7  # a static track present from the start needs at least this
     visitor_min_move: float = 0.5  # "moved": centre travels >= this x box diagonal
     visitor_near_dist: float = 0.7  # within this x seat diag of the seat ...
     visitor_near_rel_h: float = 0.45  # ... a visitor may be this small (client seated across the desk)
     visitor_min_score: float = 0.5  # median detection score; mirror images in the glass score ~0.3-0.45
+    visitor_strong_score: float = 0.7  # ... unless detected at >= this score ...
+    visitor_strong_s: float = 2.0  # ... for >= this long consecutively, or this long in total AND
+    visitor_strong_share: float = 0.2  # ... on >= this share of its samples (a ghost spiking on 1-2%
+    # of a long clip is not a person)
+    visitor_weak_min_s: float = 5.0  # a weak (low-score) track still counts when it lasts this long,
+    visitor_weak_size_cv: float = 0.1  # ... changes its box size (cv of height >= this), moves and is
+    # at least visitor_far_rel_h x the cashier's height (posters/ghosts on chairs never do all that)
     outside_min_dist: float = 0.5  # door-crossing point must be >= this x seat diag from the seat
     outside_door_overlap: float = 0.15  # crossing box overlaps door/glass evidence (share of its area)
-    outside_edge_margin: float = 0.02  # ... or touches the left/right/top frame edge (normalized margin)
     outside_scale_drop: float = 0.7  # ... or is seen this much smaller afterwards (farther, behind glass)
-    outside_score_drop: float = 0.75  # ... or this much weaker (detection score) afterwards
+    outside_edge_margin: float = 0.02  # cashier only: ... or touches the left/right/top frame edge
+    outside_score_drop: float = 0.75  # cashier only: ... or is detected this much weaker afterwards
     outside_baseline_s: float = 2.0  # "before" = the walk just before the crossing (within the episode)
-    # the three evidence-free cues above only count for an episode that never comes back
+    # these evidence-free cues only count for an episode that never comes back. Edge / score cues
+    # are for the cashier only (the lone cashier leaving and staying visible behind the glass at a
+    # similar size); for visitors they are not evidence (people at the border of an unfamiliar view,
+    # seated customers cut by the frame, turning away or occluded, are still in the room)
     outside_return_frac: float = 0.3  # back inside when closer than this x the crossing distance
     # (people walking along the glass outside come back to ~0.5x in 2D; a real return reaches ~0.2x)
     outside_min_after_s: float = 1.0  # ... followed by >= this long of track (seen behind the glass)
+    dup_min_common: float = 0.5  # door evidence from another track is ignored when it is the same
+    dup_containment: float = 0.6  # person: coexists this much, its box lies this much inside ours
     idswitch_s: float = 1.0  # a cashier fragment born within this after another one died ...
     idswitch_dist: float = 0.5  # ... closer than this x the dead box diagonal is a tracker id switch
 
@@ -151,8 +165,9 @@ def build_timeline(
     cashier = [tr for tr in valid if tr.id in cashier_ids]
     others = [tr for tr in valid if tr.id not in cashier_ids]
     ref_h = float(np.median([b[3] - b[1] for tr in cashier for b in tr.boxes])) if cashier else 0.0
-    visitors = [tr for tr in others if _is_visitor(tr, seat, aspect, p, ref_h, t_first)]
-    background = [tr for tr in others if tr not in visitors]
+    bg_reason = {tr.id: _background_reason(tr, seat, aspect, p, ref_h, t_first, step) for tr in others}
+    visitors = [tr for tr in others if bg_reason[tr.id] is None]
+    background = [tr for tr in others if bg_reason[tr.id] is not None]
     valid = cashier + visitors  # background tracks (glass reflections, people outside) are not counted
 
     # ---- people that left through the door but stay visible behind the glass wall
@@ -163,7 +178,7 @@ def build_timeline(
 
     births = {tr.id: tr.boxes[0] for tr in valid if tr.start > t_first + p.edge_s and _away(tr.boxes[0])}
     deaths = {tr.id: tr.boxes[-1] for tr in valid if tr.end < t_last - p.edge_s and _away(tr.boxes[-1])}
-    glass = [Z.median_box(tr.boxes) for tr in background]
+    glass = {tr.id: Z.median_box(tr.boxes) for tr in background}
     # times the cashier is at the seat in any of her tracks (she may sit again as a new track id)
     seat_times = sorted(float(t) for tr in cashier for t, b in zip(tr.t, tr.boxes)
                         if Z.at_seat(b, seat, aspect, p.seat_frac)) if seat is not None else []
@@ -179,12 +194,25 @@ def build_timeline(
             if float(np.linalg.norm(ca - cb)) <= p.idswitch_dist * Z.iso_diag(a.boxes[-1], aspect):
                 sw_births.add(b.id)
                 sw_deaths.add(a.id)
+    by_any = {tr.id: tr for tr in valid + background}
     for tr in valid:
         is_c = tr.id in cashier_ids
         skip_b, skip_d = (sw_births, sw_deaths) if is_c else (set(), set())
-        evidence = glass + [b for i, b in births.items() if i not in skip_b] + \
-            [b for i, b in deaths.items() if i != tr.id and i not in skip_d]
-        iv = _outside_intervals(tr, is_c, seat, aspect, p, evidence, seat_times if is_c else [])
+        # positive evidence only: duplicates / part boxes of this same person (coexisting tracks on
+        # top of it, common in crowded unfamiliar scenes) say nothing about a door or glass there.
+        # Checked lazily, only for evidence that overlaps a crossing candidate.
+        evidence = [(b, i) for i, b in glass.items()] + \
+            [(b, i) for i, b in births.items() if i not in skip_b] + \
+            [(b, i) for i, b in deaths.items() if i != tr.id and i not in skip_d]
+        dup_cache: dict[int, bool] = {}
+
+        def not_dup(i, tr=tr, cache=dup_cache):
+            if i == tr.id:
+                return True  # the track's own birth is evidence
+            if i not in cache:
+                cache[i] = _same_person(tr, by_any[i], step, p)
+            return not cache[i]
+        iv = _outside_intervals(tr, is_c, seat, aspect, p, evidence, seat_times if is_c else [], not_dup)
         if iv:
             outside_iv[tr.id] = iv
 
@@ -318,6 +346,7 @@ def build_timeline(
             "visitor_tracks": sorted(tr.id for tr in visitors),
             "background_tracks": sorted(tr.id for tr in background),
         },
+        "background_reasons": {str(tr.id): bg_reason[tr.id] for tr in sorted(background, key=lambda x: x.id)},
         "zones": {
             "seat": [round(v, 4) for v in seat] if seat else None,
             "door": [round(v, 4) for v in d] if (d := Z.door_zone(door_pts)) else None,
@@ -351,34 +380,59 @@ def _overlap_rel(person, other) -> float:
     return ix * iy / max(box_area(person), 1e-9)
 
 
-def _left_cue(tr: Track, f: int, start: int, end: int, seated, p: TimelineParams) -> bool:
-    """Evidence-free cue that the person at sample f went out of the room: the box touches the
-    left/right/top frame edge (door at the image border; the bottom edge is not a cue, since in
-    ceiling-corner views the feet of anybody walking towards the camera are cut there), or
-    afterwards the person is seen clearly smaller / weaker than during the walk just before the
-    crossing (samples start..f-1 of the same episode, last outside_baseline_s). For the cashier the
+def _same_person(a: Track, b: Track, step: float, p: TimelineParams) -> bool:
+    """Whether b is a duplicate / part box of the person tracked by a: they coexist for >=
+    dup_min_common of b's samples (and >= 3) and b's box lies mostly inside a's there (median
+    intersection over the smaller box >= dup_containment)."""
+    if b.end < a.start or b.start > a.end:
+        return False
+    j = _box_index(np.asarray(a.t, float), np.asarray(b.t, float), step / 2, 0.0)
+    common = [(int(ja), kb) for kb, ja in enumerate(j) if ja >= 0]
+    if len(common) < max(3, p.dup_min_common * len(b.t)):
+        return False
+    cont = []
+    for ja, kb in common:
+        x, y = a.boxes[ja], b.boxes[kb]
+        ix = max(0.0, min(x[2], y[2]) - max(x[0], y[0]))
+        iy = max(0.0, min(x[3], y[3]) - max(x[1], y[1]))
+        cont.append(ix * iy / max(min(box_area(x), box_area(y)), 1e-9))
+    return float(np.median(cont)) >= p.dup_containment
+
+
+def _left_cue(tr: Track, f: int, start: int, end: int, seated, p: TimelineParams,
+              is_cashier: bool = False) -> bool:
+    """Evidence-free cue that the person at sample f went out of the room: afterwards the person is
+    seen clearly smaller (scale prior: farther away, behind the glass) than during the walk just
+    before the crossing (samples start..f-1 of the same episode, last outside_baseline_s). For the
+    cashier only, also: the box touches the left/right/top frame edge (door at the image border;
+    the bottom edge is not a cue, since in ceiling-corner views the feet of anybody walking towards
+    the camera are cut there), or she is detected clearly weaker afterwards. For the cashier the
     height baseline is also capped by her seated height, so crouching (at the safe) is not
     "smaller". Only meant for episodes that never come back (see _outside_intervals)."""
-    b = tr.boxes[f]
-    m = p.outside_edge_margin
-    if b[0] <= m or b[1] <= m or b[2] >= 1 - m:
-        return True
+    if is_cashier:
+        b = tr.boxes[f]
+        m = p.outside_edge_margin
+        if b[0] <= m or b[1] <= m or b[2] >= 1 - m:
+            return True
     step = float(np.median(np.diff(tr.t))) if len(tr.t) > 1 else 0.25
     lo = max(start, f - max(2, int(round(p.outside_baseline_s / step))))
     if f - lo < 2 or end - f < 2:
         return False
     h = np.asarray([x[3] - x[1] for x in tr.boxes])
-    sc = np.asarray(tr.scores)
     base_h = float(np.median(h[lo:f]))
     if seated is not None and seated.any():
         base_h = min(base_h, float(np.median(h[seated])))
     if np.median(h[f + 1 : end + 1]) <= p.outside_scale_drop * base_h:
         return True
+    if not is_cashier:
+        return False
+    sc = np.asarray(tr.scores)
     return bool(np.median(sc[f + 1 : end + 1]) <= p.outside_score_drop * np.median(sc[lo:f]))
 
 
 def _outside_intervals(tr: Track, is_cashier: bool, seat, aspect: float, p: TimelineParams,
-                       door_evidence: list, seat_times: list[float] = ()) -> list[tuple[float, float, bool]]:
+                       door_evidence: list, seat_times: list[float] = (),
+                       use_evidence=None) -> list[tuple[float, float, bool]]:
     """Intervals [(t_cross, t_back_or_end, came_back)] when the track is outside the room but still
     detected behind the glass wall.
 
@@ -387,13 +441,14 @@ def _outside_intervals(tr: Track, is_cashier: bool, seat, aspect: float, p: Time
     after first sitting; visitor: after the closest approach to the desk) the crossing candidate is
     the farthest point from the seat. It counts only if all hold:
       (a) it is >= outside_min_dist seat diagonals from the seat;
-      (b) a door cue: its box overlaps door/glass evidence (people seen behind the glass, other
-          tracks' births/deaths, the track's own birth) by >= outside_door_overlap of its own area,
-          OR (no evidence needed, only when the episode never comes back: no return toward the
-          seat, the cashier does not sit again later in any of her tracks) it touches the
-          left/right/top frame edge, or afterwards the person is seen clearly smaller
-          (<= outside_scale_drop x) or weaker (<= outside_score_drop x) than on the walk just
-          before (see _left_cue);
+      (b) positive evidence: its box overlaps door/glass evidence (people seen behind the glass,
+          other tracks' births/deaths, the track's own birth; never tracks of this same person,
+          see _same_person) by >= outside_door_overlap of its own area, OR (only when the episode
+          never comes back: no return toward the seat, the cashier does not sit again later in
+          any of her tracks) a scale prior: afterwards the person is seen clearly smaller
+          (<= outside_scale_drop x) than on the walk just before; for the cashier only also a
+          frame-edge touch or a clearly weaker detection afterwards (see _left_cue). Without such
+          evidence a visitor counts as present (frame edges are not doors in unfamiliar views);
       (c) the track continues >= outside_min_after_s afterwards;
       (d) a visitor gets back about as far as where they first appeared (a client seated at the
           desk is not leaving).
@@ -435,11 +490,13 @@ def _outside_intervals(tr: Track, is_cashier: bool, seat, aspect: float, p: Time
             back = next((q for q in range(f + 1, i1) if dist[q] < p.outside_return_frac * dmax), None)
             seg_end = (back - 1) if back is not None else i1 - 1
             came_back = back is not None or i1 < len(tr.t)  # sat down again = came back as well
-            door_cue = any(_overlap_rel(tr.boxes[f], e) >= p.outside_door_overlap for e in door_evidence)
+            door_cue = any(_overlap_rel(tr.boxes[f], e) >= p.outside_door_overlap
+                           and (use_evidence is None or use_evidence(src)) for e, src in door_evidence)
             # a return (or sitting again, even as another track) makes an evidence-free cue
             # meaningless: crouching / occluded / feet cut at the safe and back is not an exit
             returns = came_back or any(t > tr.t[f] + 1e-6 for t in seat_times)
-            if not (door_cue or (not returns and _left_cue(tr, f, i0, seg_end, seated if is_cashier else None, p))):
+            if not (door_cue or (not returns and _left_cue(tr, f, i0, seg_end, seated if is_cashier else None, p,
+                                                             is_cashier))):
                 break
             t_end = tr.t[back] if back is not None else (tr.t[i1] if i1 < len(tr.t) else tr.t[-1])
             if t_end - tr.t[f] >= p.outside_min_after_s - 1e-6:
@@ -450,29 +507,56 @@ def _outside_intervals(tr: Track, is_cashier: bool, seat, aspect: float, p: Time
     return out
 
 
-def _is_visitor(tr: Track, seat, aspect: float, p: TimelineParams, ref_h: float, t_first: float) -> bool:
-    """A non-cashier track is a person in the room if it lasts >= min_visitor_s and comes near the
-    seat at some point. Static detections far from the desk (people behind the glass wall, mirror
-    images in the glass) are background. Without a seat every lasting track counts."""
-    if tr.end - tr.start < p.min_visitor_s - 1e-6 or float(np.median(tr.scores)) < p.visitor_min_score:
-        return False
-    if seat is None:
-        return True
-    c = Z.iso_centers(tr.boxes, aspect)
-    s = Z.iso_centers([seat], aspect)[0]
-    near = float(np.min(np.linalg.norm(c - s, axis=1))) / Z.iso_diag(seat, aspect)
-    if near > p.visitor_seat_dist:
-        return False
-    # small = far behind the glass / a mirror image; a client seated right across the desk is smaller
-    # than the cashier too, so close to the seat a lower size bound applies
+def _background_reason(tr: Track, seat, aspect: float, p: TimelineParams, ref_h: float, t_first: float,
+                       step: float) -> str | None:
+    """Why a non-cashier track is background (not a person in the room), or None = a visitor.
+
+    Background needs positive evidence, so that a stationary real person on an unfamiliar camera
+    (standing behind the counter, robbers far from the detected seat) still counts:
+      "short"     - lasts < min_visitor_s (tracker fragment);
+      "small"     - scale prior for "behind the glass / far away": median height < visitor_min_rel_h
+                    x the cashier's (visitor_near_rel_h close to the seat: a client seated across the
+                    desk is smaller too), or a static track present from the start < visitor_static_rel_h;
+      "far_small" - farther than visitor_seat_dist seat diagonals from the seat AND smaller than
+                    visitor_far_rel_h x the cashier (people walking behind the glass wall). A far but
+                    big track is a person in the room (other layouts put people far from the seat);
+      "low_score" - weak detection (median < visitor_min_score: mirror images, posters, coats on a
+                    chair) unless it is strong (>= visitor_strong_s consecutively, or in total on >=
+                    visitor_strong_share of its samples), or it lasts >=
+                    visitor_weak_min_s while moving, changing its box size and being person-sized.
+    Without a seat only "short" and "low_score" apply."""
+    if tr.end - tr.start < p.min_visitor_s - 1e-6:
+        return "short"
+    sc = np.asarray(tr.scores, float)
+    hi = sc >= p.visitor_strong_score
+    run = best = 0
+    for v in hi:
+        run = run + 1 if v else 0
+        best = max(best, run)
+    strong = best * step >= p.visitor_strong_s - 1e-6 or (
+        float(np.sum(hi)) * step >= p.visitor_strong_s - 1e-6 and float(np.mean(hi)) >= p.visitor_strong_share)
     hs = np.asarray(tr.boxes)[:, 3] - np.asarray(tr.boxes)[:, 1]
-    rel_h = float(np.median(hs)) / max(ref_h, 1e-6)
-    if rel_h < (p.visitor_near_rel_h if near <= p.visitor_near_dist else p.visitor_min_rel_h):
-        return False
+    rel_h = float(np.median(hs)) / ref_h if ref_h > 0 else 1.0
+    c = Z.iso_centers(tr.boxes, aspect)
     diag = float(np.median([Z.iso_diag(b, aspect) for b in tr.boxes]))
     moved = float(np.max(np.linalg.norm(c - c[0], axis=1))) >= p.visitor_min_move * diag
-    entered = tr.start > t_first + p.edge_s
-    return entered or moved or rel_h >= p.visitor_static_rel_h
+    if seat is not None:
+        s = Z.iso_centers([seat], aspect)[0]
+        near = float(np.min(np.linalg.norm(c - s, axis=1))) / Z.iso_diag(seat, aspect)
+        if rel_h < (p.visitor_near_rel_h if near <= p.visitor_near_dist else p.visitor_min_rel_h):
+            return "small"
+        if near > p.visitor_seat_dist and rel_h < p.visitor_far_rel_h:
+            return "far_small"
+        entered = tr.start > t_first + p.edge_s
+        if not (entered or moved or rel_h >= p.visitor_static_rel_h):
+            return "small"
+    if float(np.median(sc)) < p.visitor_min_score and not strong:
+        size_cv = float(np.std(hs) / max(float(np.median(hs)), 1e-9))
+        lasting = (tr.end - tr.start >= p.visitor_weak_min_s - 1e-6 and moved
+                   and size_cv >= p.visitor_weak_size_cv and rel_h >= p.visitor_far_rel_h)
+        if not lasting:
+            return "low_score"
+    return None
 
 
 def _present_between(group: list[Track], me: Track, t0: float, t1: float) -> bool:

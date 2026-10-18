@@ -88,7 +88,7 @@ def client_for(tmp_path, **kw):
     from app.main import create_app
     from app.rules import BUNDLED_RULES_PATH
 
-    settings = Settings(api_key="k", api_key_is_default=False, data_dir=tmp_path / "data",
+    settings = Settings(api_key="health-test-key-0123456789", data_dir=tmp_path / "data",
                         rules_path=str(BUNDLED_RULES_PATH), **kw)
     return TestClient(create_app(settings))
 
@@ -98,7 +98,8 @@ def test_healthz_reports_vlm(tmp_path, monkeypatch):
     monkeypatch.setattr(health, "_default_open", fake_open(calls))
     with client_for(tmp_path, vlm_health_url="http://127.0.0.1:8090/health") as c:
         body = c.get("/healthz").json()
-        assert body["vlm_ok"] is True and body["vlm_url"] == "http://127.0.0.1:8090/health"
+        assert body["vlm_ok"] is True and "vlm_url" not in body
+        assert "127.0.0.1" not in str(body)
         assert body["ok"] is True
         c.get("/healthz")
         assert len(calls) == 1  # cached

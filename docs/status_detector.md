@@ -1,8 +1,74 @@
 # Detector status (forte-detector)
 
-Updated: 2026-10-17 (phase 1 start)
+Updated: 2026-10-18 ~00:30 Almaty — **FINAL detector for submission: 38f9946** (branch `release-2a508df`; tree = frozen build 2a508df, includes thread-safety). Detector code frozen; only genuine production bugs (crash / schema / hang) before 07:00.
+
+## Post-freeze scoped releases (orchestrator-approved)
+- **release-procedure d7123c7**: adapter-only `meta.procedure` (procedure type incl. `client_operation`, per-step statuses, verified citations). No detection change.
+- **release-unseen 67d1dbe** (candidate, sent for ff): T13 PhoneRule (cashier crop + desk crop / 2×2 tiles at 3–6 checkpoints, persistent-answer firing) and T14 covered-from-start (brightness-normalised structureless test). 42-orig: 0/42 verdict diffs vs 2a508df, 0 T13/T14 on any of the 42; phone set 10/12 (0/4 clean), MEVA 4/8 (0/3 neg), covered-from-start 8/8, dim 0/8. Misses: ext02, e2_27 (phone), hand-at-lens-from-start (T14).
+- T10 UV-detector veto: attempted, rejected (documented limitation).
+- **Hot-swap candidate e43bca7** (branch `release-t3-fallback` = 67d1dbe + T3 fallback): orig 21/22 FP 4/20, reencode 20/22 FP 6/20; only change X-22 miss→hit; no new clean firing, no TP→FN. Caveat: the fallback fires on key_in_safe p(yes) ≥0.0015 — a threshold fitted to separate X-22 from other departures, unlikely to generalise. T8 (X-44) dropped: no clean cue. Orchestrator decides.
+- **User chose option B; detector main = 8540d83** (orchestrator ff). Real PC runs confirm the estimate: orig 21/22, FP 9/20, hard-neg 8/19, hit@5s 86%; reencode 20/22, FP 11/20; new clean firings exactly X-12, X-23, X-25, X-27, X-29 (low-confidence «проверьте сейф: дверца или ключ»); no TP→FN. Runs: work/pc_runs/8540d83e2301-{orig-20261018-092216, reencode-20261018-093131}.
+- Option B prepared (not shipped): 8540d83 on `option-b-t3-unconditional` (= e43bca7 + unconditional T3 hint; env FORTE_T3_FALLBACK_PYES=0.0015 restores A). Offline estimate: orig 21/22, FP 9/20; reencode 20/22, FP 11/20; new clean firings X-12, X-23, X-25, X-27, X-29.
+- **FINAL detector = 67d1dbe** (merged by orchestrator). Veo text-only synthetic set (robust/synthetic): 5/5 violations with correct type (T13 ×2 @4.9, T3 @4.6, T14 @5.0, T4 @5.1 + extra T1/T5), clean clip clean. Results: work/pc_runs/67d1dbe1b7a0-synthetic_alias-20261018-035155/.
+- Real-world camera-cover clips (robust/phone t14_01..03) on 67d1dbe: 0/3 T14. Two are screen recordings of VMS desktop software (out of scope for a camera-feed detector); one (t14_01) is a genuine partial hand cover (finger edges/background visible) — not detected (known limitation). On raw camera frames: synthetic 10/10, covered-from-frame-0 8/8, real spray clip caught. Orchestrator decision: no further change.
+- veo_door_open (T5 @3, new angle opposite the entrance): **T5 @4.2** correct; extra T6 @7.2 from a Veo artifact (duplicated cashier), ignored.
+- veo_outsider (T6 @3, lone outsider at the desk): verdict violation via T5 @2.9 (door open as he enters), **no T6** — a single non-staff visitor at the desk is indistinguishable from a client (T6 needs ≥3 persons or a second non-staff person).
+- Veo clean counterparts (4): T14 silent on pass-by and dimmed lights; T4 silent on locked laptop (that clip gets a correct-looking T1: banknotes left on desk); veo_safe_clean: T4 correct, but **T3 key-in-lock FP** (safe keypad/handle read as a key) and **T13 desk-phone FP** (mouse/small device). Results: work/pc_runs/67d1dbe1b7a0-synthetic_alias2-20261018-042439/.
+
+## FINAL — headline numbers (PC runner, clean export, `--fresh`, 5080 VLM, 0 degraded)
+
+| Set | Recall | FP (clean) | FP excl. team-T15 clips | Other |
+|---|---|---|---|---|
+| 42 orig (organizer labels) | **20/22** | 4/20 | **0/16** | team-T15 4/4; hard-neg FP 3/19; type-hit 85% (primary 80%); hit@3s 64%, **hit@5s 82%**, mean \|Δt\| 2.5 s; 2-fold CV 10/11 + 9/11 |
+| 42 re-encoded (crf18) | 18/22 | 6/20 | 2/16 | TP→FN flips 2/42 (X-2, X-13); type-hit 100% |
+| simulated new angle (newcam_combo) | 16/22 | 11/20 | 8/16 | report only |
+| external2 (27 foreign-scene clips) | 10/15 | 7/11 | — | type-hit 5/10, median \|Δt\| 4.0 s, hit@5s 6/10 |
+| synthetic camera-cover set (16 clips) | 10/10 | 0/6 | — | + real spray-painted lens (e2_28) caught at 3.0 s |
+
+Runtime per video (145 s max clip): p50 ≈ 28 s, max 80 s with 3 parallel jobs sharing the VLM (budget 5 min).
+"Team-T15 clips" = X-19/35/37/39: organizer-labelled clean, but the team decided missing client ID before cash acceptance is a violation (НБРК №231 п.19 пп.1) → they count as FP against organizer labels.
+
+## FINAL — per-type behaviour
+
+| Type | How it is detected | On the 42 | Known weak spots |
+|---|---|---|---|
+| T1 / T1b cash / stamps left unattended | cashier departure (perception: seat-leave + door/glass/edge exit) → VLM desk-crop cues (cash, stamps/journal, bag) | X-15, X-24, X-26 caught | desk ROI anchored on laptop+counting machine; on unfamiliar desks it can include customer counters |
+| T2 previous client's cash not cleared | client change + cash on desk / in machine across ≥2 probes | X-4/X-47, X-38, X-18 caught | encode-fragile (single near-threshold VLM answers); some FPs on re-encode (X-14) |
+| T3 safe open / key in lock | safe ROI (OWLv2) + VLM safe_open / key_in_safe | X-20 caught | **X-22 missed: key too small for the VLM (key cue ~43% accurate)** |
+| T4 workstation unlocked | laptop ROI, auto-contrast crop, VLM screen_on_unlocked at departure | X-28, X-11 caught | lock screens that are bright images are a theoretical FP risk (none flipped in tests) |
+| T5 door left open | CV only: door ROI vs consensus closed reference, lighting guard, abstains when ambiguous | X-30, X-32, X-33 caught | on the simulated new angle X-32/X-33 missed; door open from frame 0 and closed by someone within seconds can invert |
+| T6 extra / unauthorised persons | client-change counts + weak CrowdRule (≥3 person-sized people in room ≥3 s, VLM count veto) | X-30/X-33 via door path; CrowdRule adds T6 on X-37/38/39 | **X-30/X-33 intruders classed as background by perception → CrowdRule can't see them; VLM undercounts crowds; on new cameras the wrong person can be taken as cashier** |
+| T7 client leaves during count | visit exit with two after-counts + counting machine | X-34 caught | depends on perception exit timing |
+| T8 authenticity check skipped | — | **X-44 missed (no detector-use cue)** | not implemented |
+| T9 bag handover without checks | short collector visit | X-17 caught | — |
+| T10 concealment / suspicious cash handling | hand-to-body VLM cue in 3 windows, weak events allowed | X-1, X-2 caught (X-2 run-to-run unstable) | very subtle; VLM answer flips between runs |
+| T11 / T12 personal items / food on desk | VLM desk-crop cues; weak single hit only on an equipment-anchored desk; strong needs hits ≥3 s apart | X-40, X-46 caught | **main source of FPs on unfamiliar scenes (newcam, external2)** |
+| T13 phone | VLM phone_visible 3/3 strong, or 2/3 weak with a COCO phone inside a person box | no positives in train | external phone-in-hand missed once |
+| T14 camera covered | CV only: scene-structure correlation vs reference, 1 s series, ≥2 s blocked; bounded pass past deadline | 0 FP on 42 | camera covered for the whole clip (no reference) → not flagged; camera turned to a textured view = looks like a cut |
+| T15 client not identified | procedure-aware: client deposit (not collector) → ID shown before cash acceptance? per-frame ID probes, banknote/cash veto | team clips 4/4 | depends on near-threshold VLM ID answers (0.6–0.75) |
+| T99 other suspicious | CV anomaly: visitor at desk/safe while cashier absent | never fires on the 42 (precondition never occurs) | untested on real data |
+
+External2 detail on the final build (forte-robust, robust/runs/external2_2a508df/external_score.md): T6 fires on 0/8 labelled intruder clips but on 2 clean clips (e2_13 shop counter, e2_34) → the weak CrowdRule is effectively an FP source on foreign scenes; the night-office intruder clip e2_11 now yields no event (cb77b44 had a T1); one new T15 FP (e2_12). Accepted as known limitations — the detector is frozen.
+
+Viewpoint fragility (forte-robust final sweep, 25 variants, docs/status_robust.md:51): the door-open TPs are the most angle-sensitive — X-32 lost on 13/25 and X-33 on 7/25 variants (new-angle warps, padding, yaw/pitch), i.e. the door region is not reliably re-found when the door moves or shrinks in frame. X-13 (caught as T2; label type T8) and X-2 (weak T10) flip on a plain re-encode.
+
+Zones not found on a video (door / safe / laptop) are reported as `calibration.absent` with «зона не найдена: …»; the corresponding rules then don't run instead of inventing a zone.
+
+## Known limitation: VLM run-to-run nondeterminism (measured)
+Same commit, same videos, same settings, `--fresh` (llama-server Qwen3-VL-4B, temp 0, `-np 4` slot batching on a loaded PC):
+- 46b8c29 run1 vs run2: **2/42 verdict flips** (X-1, X-19) + 1 type-only change (X-38); recall 20/22 vs 19/22.
+- ea2e4ca run1 vs run2: 0/42 verdict flips, 1 type-only change (X-4).
+- VLM confidences jitter by ~0.01 on most answers; flips happen on cues sitting near decision bars (ID shown 0.6–0.75, hand-to-body ~0.5–0.77).
+→ ±1 recall on the 42 is within noise; T15 / T10 decisions near those bars are fragile. Mitigations in the rules: multi-frame "any" voting, extra probe windows, weak-event fallback at low fact_conf.
 
 ## Merge state
+- **Improvement release candidate 38f9946** (branch `release-2a508df`, tree = 2a508df, includes thread-safety): orig 20/22 FP 0/16 excl. team; reencode 18/22, TP→FN 2, FP 2/16 excl.; newcam 16/22, FP 8/16 excl. (mostly T11/T12); external2 recall 10/15, FP 7/11, type-hit 5/10, median |Δt| 4.0 s (cb77b44: 10/15, 6/11, 4/10, 7.7 s); t14_synth 10/10 FP 0/6 (agent runs). Smoke identical. Sent for ff. Next targets: T11/T12 FPs on unfamiliar desks; T6 intruders classed as background.
+- **Improvement release FROZEN at 2a508df** (worktree-phase1): T11/T12 anchor tightening; T14 camera-blocked rewrite (structure correlation, dense 1 s series, bounded pass past deadline; synth 10/10 FP 0/6, real e2_28 caught); perception positive-evidence background + cashier-only exit cues; absent-zone state (no invented door/safe/laptop zones, «зона не найдена»); weak T6 CrowdRule. Suite 415 pass / 1 skip. Final gate running (orig → reencode → newcam → external2 → t14_synth). **orig: recall 20/22 (FN X-22, X-44), FP 0/16 excl. team-T15 (4/20 incl.), team T15 4/4, hard-neg 3/19, type-hit 85%, hit@5s 82%, CV 10/11 + 9/11, runtime max 80 s — passes.**
+- **Thread-safety release e018e47** (branch `release-thread-safety` = e06f05b + merge main): locked singletons, per-model inference lock, VLM BoundedSemaphore(FORTE_VLM_SLOTS=4, must equal llama-server -np), per-job VLM failure state, atomic cache writes. Paired PC check: e06f05b vs a same-day re-run of its parent = 0/42 diffs. Suite 357/0 fail. Sent for ff.
+- **b785021 orig (PC, fresh, 0 degraded) — BEST**: recall **20/22** (FN X-22, X-44), FP 0/16 excl. team (4/20 incl., all team-T15), **team T15 4/4**, hard-neg 3/19, type-hit 85%, hit@5s 82%, CV A 10/11 FP 2/10, B 9/11 FP 1/10, runtime max 77 s. Reencode/newcam running.
+- 03c6db6 orig (banknotes veto): 19/22, FP 0/16 excl. team, **team T15 4/4**, hard-neg 3/19, hit@5s 77%; X-2 lost to VLM variance on the hand cue (0.77 yes → 0.53 no). Next candidate b785021 (third offset hand window) gating.
+- **Release candidate cb77b44** (branch `release-46b8c29`, tree = 46b8c29): orig 20/22 FP 0/16 excl. team; reencode 19/22, TP→FN 1, FP 2/16 excl.; newcam 14/22 FP 9/20; runtime max 83 s. Smoke identical. Sent for ff (supersedes 9f8d3b9).
+- **46b8c29 orig (PC, fresh, 0 degraded) — NEW BEST**: recall **20/22** (FN X-22, X-44), FP 0/16 excl. team-T15 (2/20 incl.), hard-neg 2/19, type-hit 80%, hit@5s 82%, CV A 9/11 FP 0/10, B 10/11 FP 2/10, runtime p50 25 s / max 83 s. Team T15 1/4 (window now includes banknote hand-overs → per-frame ID next). X-1 caught via weak T15 (type wrong). **T99 never fires on the 42 clips** (precondition: visitor at desk while cashier absent — never occurs); default fact 0.3 so it is reportable when it does. Reencode/newcam running.
 - ea2e4ca reencode: 19/22, FP 4/16 excl. team, **0 TP→FN flips** (all 19 positives fire on both encodes), type-hit 95%, hit@5s 82% → passes refined gate.
 - ea2e4ca orig (PC, fresh): 19/22, FP 2/16 excl. team-T15 (X-5/X-48 T15, ID shown after the window), team T15 2/4, hard-neg 4/19, hit@5s 82%, runtime max 74 s. X-19 T15 root cause: one unsure ID "yes" (0.63) during the banknote hand-over with notes in hand (no cash-on-desk veto). Next candidate 2e873d1: ID window to arrival+4 s, single unsure late yes ignored, VLM plan 70 / cap 90 (+20 follow-up reserve), T7 strong ≥ weak.
 - **Release candidate 9f8d3b9** (branch `release-ba2f4df`, tree = ba2f4df): orig 19/22, FP 0/16 excl. team-T15, hit@5s 82%; reencode 18/22, TP→FN 1, FP 4/16 excl.; **newcam 15/22**, FP 9/20. Smoke identical. Sent for ff. Known: T15 veto not frame-aligned (fix next candidate).

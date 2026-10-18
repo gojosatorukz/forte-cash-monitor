@@ -325,7 +325,7 @@ def test_feedback_jsonl(tmp_path, test_video):
             assert job == {"kind": "job", "job_id": a, "filename": "clip.mov", "verdict": "violation",
                            "decision": "confirmed", "decision_comment": "есть", "reviewer_name": "А",
                            "reviewer_position": "кассир-контролёр", "decided_at": job["decided_at"],
-                           "n_violations": 3, "n_confirmed": 1, "n_rejected": 1}
+                           "n_violations": 3, "n_confirmed": 1, "n_rejected": 1, "checklist": {}}
             assert job["decided_at"]
             assert lines[3]["comment"] == "это ручка"
 
@@ -337,6 +337,85 @@ def test_feedback_clean_job_decision(tmp_path, test_video):
         lines = [json.loads(x) for x in c.get("/ui-api/feedback.jsonl").text.splitlines()]
         assert len(lines) == 1 and lines[0]["kind"] == "job" and lines[0]["verdict"] == "no_violation"
         assert lines[0]["n_violations"] == 0
+
+
+# ---------- reviewer checklist ----------
+
+CHECKLIST_FILE = Path(__file__).resolve().parent.parent / "app" / "checklist.json"
+# docs/ lives in the datathon repo root above the service (main checkout or a nested worktree).
+REGULATIONS = next((p / "docs" / "regulations.md" for p in Path(__file__).resolve().parents
+                    if (p / "docs" / "regulations.md").exists()), Path("/nonexistent/regulations.md"))
+
+
+@pytest.mark.parametrize("body", [
+    {"checklist": {"surprise": True}},
+    {"checklist": {"client_identified": "yes"}},
+    {"checklist": {"client_identified": 1}},
+    {"checklist": {"client_identified": True, "nope": None}},
+    {"checklist": ["client_identified"]},
+    {"checklist": True},
+])
+def test_checklist_422(tmp_path, test_video, body):
+    with client_for(tmp_path, analyzer=ThreeViolations()) as c:
+        job_id = done_job(c, test_video)
+        r = post(c, job_id, body)
+        assert r.status_code == 422, r.text
+        assert c.get(f"/ui-api/jobs/{job_id}").json()["review"] is None
+
+
+def test_checklist_merge_persist_feedback(tmp_path, test_video):
+    with client_for(tmp_path, analyzer=ThreeViolations()) as c:
+        job_id = done_job(c, test_video)
+        rv = post(c, job_id, {"checklist": {"cash_doc_signed": False}}).json()["review"]
+        assert rv["checklist"] == {"cash_doc_signed": False}
+        rv = post(c, job_id, {"checklist": {"client_identified": True}}, ui=False).json()["review"]
+        assert rv["checklist"] == {"client_identified": True, "cash_doc_signed": False}  # merged, ordered
+        assert list(rv["checklist"]) == ["client_identified", "cash_doc_signed"]
+        rv = post(c, job_id, {"checklist": {"client_identified": None, "client_got_receipt": True},
+                              "decision": "needs_followup"}).json()["review"]
+        assert rv["checklist"] == {"client_identified": None, "cash_doc_signed": False, "client_got_receipt": True}
+        assert post(c, job_id, {"checklist": None}).json()["review"]["checklist"] == rv["checklist"]  # no-op
+        rv = post(c, job_id, {"checklist": {"suspicious_note_procedure": False, "client_signature_checked": True,
+                                            "payout_counted_in_presence": None}}).json()["review"]
+        assert list(rv["checklist"]) == ["client_identified", "client_signature_checked", "cash_doc_signed",
+                                         "client_got_receipt", "payout_counted_in_presence", "suspicious_note_procedure"]
+        assert_contract(c.get(f"/api/v1/jobs/{job_id}", headers=HDR).json())
+        line = [json.loads(x) for x in c.get("/ui-api/feedback.jsonl").text.splitlines()][-1]
+        assert line["kind"] == "job" and line["checklist"] == rv["checklist"]
+    with client_for(tmp_path, analyzer=ThreeViolations()) as c2:
+        assert c2.get(f"/ui-api/jobs/{job_id}").json()["review"]["checklist"] == rv["checklist"]
+
+
+def test_checklist_served_matches_file(tmp_path):
+    items = json.loads(CHECKLIST_FILE.read_text("utf-8"))
+    assert [i["id"] for i in items] == ["client_identified", "client_signature_checked", "cash_doc_signed",
+                                        "client_got_receipt", "cash_traced_to_storage", "payout_counted_in_presence",
+                                        "damaged_bag_opened_with_collector", "suspicious_note_procedure"]
+    groups = {i["id"]: i["group"] for i in items}
+    assert groups == {"client_identified": "Общие", "client_signature_checked": "Общие", "cash_doc_signed": "Общие",
+                      "client_got_receipt": "Общие", "cash_traced_to_storage": "Общие",
+                      "payout_counted_in_presence": "Выдача", "damaged_bag_opened_with_collector": "Инкассация",
+                      "suspicious_note_procedure": "Сомнительные купюры"}
+    for i in items:
+        assert set(i) >= {"id", "label_ru", "basis", "quote", "url", "group"}
+        assert i["url"] == "https://adilet.zan.kz/rus/docs/V1900019680"
+    with client_for(tmp_path, analyzer=NoViolations()) as c:
+        assert c.get("/ui-api/rules").json()["checklist"] == items
+    with client_for(tmp_path, analyzer=NoViolations(), login=False) as c:
+        assert c.get("/ui-api/rules").status_code == 401
+
+
+@pytest.mark.skipif(not REGULATIONS.exists(), reason="docs/regulations.md not available")
+def test_checklist_quotes_verbatim_from_regulations():
+    import re
+    text = REGULATIONS.read_text("utf-8")
+    items = json.loads(CHECKLIST_FILE.read_text("utf-8"))
+    assert len(items) == 8
+    for i in items:
+        frags = re.findall("«([^»]*)»", i["quote"])
+        assert frags, i["id"]  # every item carries at least one verbatim fragment
+        for q in frags:
+            assert q in text, (i["id"], q)
 
 
 # ---------- static ----------
@@ -355,7 +434,13 @@ def test_act_page_served(tmp_path):
                  "распознавание лиц не применялось"):
         assert text in js or text in r.text, text
     app_js = (STATIC / "app.js").read_text("utf-8")
-    for text in ("Проверка специалистом", "Сформировать акт", "Укажите ФИО проверяющего", "/review"):
+    assert "Проверено вручную (не видно на видео)" in js and "Не проверялось" in js
+    # checklist grouped in both the panel and the act; non-general groups collapsed in the panel
+    for src in (js, app_js):
+        assert '["Общие", "Выдача", "Инкассация", "Сомнительные купюры"]' in src
+    assert 'el("details", { class: "cl-group" }' in app_js and '"Не проверялось: "' in js
+    for text in ("Проверка специалистом", "Сформировать акт", "Укажите ФИО проверяющего", "/review",
+                 "Чек-лист проверяющего"):
         assert text in app_js or text in (STATIC / "index.html").read_text("utf-8"), text
 
 

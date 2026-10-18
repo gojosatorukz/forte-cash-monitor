@@ -7,6 +7,7 @@ Outputs normalized xyxy boxes.
 from __future__ import annotations
 
 import logging
+import threading
 
 import cv2
 import numpy as np
@@ -31,6 +32,11 @@ def _pick_device(device: str | None) -> str:
 
 
 class Detector:
+    # Serialises forward passes and device moves on this (process-wide, shared) model: the CUDA-OOM
+    # fallback and ensure_device() move the weights in place, which must never overlap another
+    # thread's forward (device/dtype mismatch). See forte_detector/concurrency.py.
+    _lock = threading.RLock()  # class default (objects built via __new__ in tests); __init__ sets one per instance
+
     def __init__(
         self,
         model_id: str = DEFAULT_MODEL,
@@ -43,6 +49,7 @@ class Detector:
         import torch
         from transformers import AutoConfig, AutoModelForObjectDetection
 
+        self._lock = threading.RLock()
         self.model_id = model_id
         self.input_size = input_size
         self.person_thr = person_thr
@@ -77,6 +84,10 @@ class Detector:
         """Back to the configured CUDA device after an OOM fallback to CPU, when CUDA is available
         (called at the start of each perceive()). True if the detector moved back. On another OOM it
         stays on CPU (the CUDA cache is emptied) and the next call tries again."""
+        with self._lock:
+            return self._ensure_device()
+
+    def _ensure_device(self) -> bool:
         torch = self._torch
         want = getattr(self, "preferred_device", self.device)
         if not str(want).startswith("cuda") or str(self.device) == str(want):
@@ -109,17 +120,19 @@ class Detector:
         return scores.cpu().numpy(), xyxy.cpu().numpy()
 
     def detect(self, frames: list[np.ndarray]) -> list[dict]:
-        """Per frame: {"persons": [[x1,y1,x2,y2,score]], "objects": [[label, x1,y1,x2,y2,score]]}."""
+        """Per frame: {"persons": [[x1,y1,x2,y2,score]], "objects": [[label, x1,y1,x2,y2,score]]}.
+        Thread-safe: each batch (forward + a possible OOM move to CPU) runs under the model lock."""
         results: list[dict] = []
         for i in range(0, len(frames), self.batch_size):
             chunk = frames[i : i + self.batch_size]
-            try:
-                scores, xyxy = self._forward(chunk)
-            except self._torch.OutOfMemoryError:
-                log.warning("CUDA OOM in detector; falling back to CPU (CUDA is retried at the next video)")
-                self._to_device("cpu")  # move first, then free the CUDA cache the weights used
-                self._torch.cuda.empty_cache()
-                scores, xyxy = self._forward(chunk)
+            with self._lock:
+                try:
+                    scores, xyxy = self._forward(chunk)
+                except self._torch.OutOfMemoryError:
+                    log.warning("CUDA OOM in detector; falling back to CPU (CUDA is retried at the next video)")
+                    self._to_device("cpu")  # move first, then free the CUDA cache the weights used
+                    self._torch.cuda.empty_cache()
+                    scores, xyxy = self._forward(chunk)
             for sc, bx in zip(scores, xyxy):
                 results.append(self._decode(sc, bx))
         return results

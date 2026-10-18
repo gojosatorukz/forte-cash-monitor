@@ -18,7 +18,7 @@ from app.main import create_app
 from app.models import AnalysisResult, EvidenceFrame, Violation
 from app.rules import BUNDLED_RULES_PATH
 
-KEY = "test-key"
+KEY = "test-key-0123456789abcdef"
 HDR = {"X-API-Key": KEY}
 UI_PASS = "test-ui-pass"
 TINY_JPEG = base64.b64encode(b"\xff\xd8\xff\xe0fake").decode()
@@ -26,7 +26,7 @@ TINY_JPEG = base64.b64encode(b"\xff\xd8\xff\xe0fake").decode()
 
 def make_settings(tmp_path: Path, **kw) -> Settings:
     # Pinned to the bundled rules so tests don't depend on ../detector or ../docs files.
-    base = dict(api_key=KEY, api_key_is_default=False, data_dir=tmp_path / "data",
+    base = dict(api_key=KEY, data_dir=tmp_path / "data",
                 job_timeout_sec=30.0, stub_debug=False, rules_path=str(BUNDLED_RULES_PATH),
                 ui_password=UI_PASS)
     if "analyzer_path_override" in kw:
@@ -195,10 +195,11 @@ def test_healthz(tmp_path):
         assert r.status_code == 200
         body = r.json()
         rules = c.app.state.rules
-        assert body == {"ok": True, "analyzer_ready": True, "analyzer_error": None,
+        assert body == {"ok": True, "api_key_configured": True, "analyzer_ready": True, "analyzer_error": None,
+                        "workers": {"configured": 1, "ready": 1, "busy": 0},
                         "public_url": None, "public_url_source": None,
-                        "rules_path": "app/rules.json", "rules_count": len(rules.rules),
-                        "vlm_ok": None, "vlm_url": None}
+                        "rules_count": len(rules.rules), "vlm_ok": None, "brand": "forte"}
+        assert "rules_path" not in body and "vlm_url" not in body
         assert body["rules_count"] >= 1
 
 
@@ -265,6 +266,84 @@ def test_public_routes_require_key(tmp_path, test_video, headers):
         assert "detail" in r.json()
         r = c.get("/api/v1/jobs/whatever", headers=headers)
         assert r.status_code == 401 and "detail" in r.json()
+
+
+NOT_CONFIGURED_DETAIL = "API_KEY не задан или слишком короткий (минимум 16 символов)"
+
+
+@pytest.mark.parametrize("api_key", ["", "   ", "short-key", "x" * 15])
+@pytest.mark.parametrize("headers", [{}, {"X-API-Key": "whatever"}, "same-as-configured"])
+def test_public_routes_503_when_key_not_configured(tmp_path, test_video, api_key, headers):
+    if headers == "same-as-configured":
+        headers = {"X-API-Key": api_key}  # even the (too short) configured value itself is rejected
+    with client_for(tmp_path, api_key=api_key) as c:
+        r = upload(c, test_video, headers=headers)
+        assert r.status_code == 503 and r.json() == {"detail": NOT_CONFIGURED_DETAIL}
+        assert r.headers["content-type"].startswith("application/json")
+        for path in ("/api/v1/jobs/whatever", "/api/v1/jobs/whatever/clips/1.mp4", "/api/v1/feedback.jsonl"):
+            r = c.get(path, headers=headers)
+            assert r.status_code == 503 and r.json() == {"detail": NOT_CONFIGURED_DETAIL}, path
+        r = c.post("/api/v1/jobs/whatever/review", json={}, headers=headers)
+        assert r.status_code == 503
+        # The app still serves health and the UI.
+        h = c.get("/healthz")
+        assert h.status_code == 200 and h.json()["api_key_configured"] is False
+        assert api_key.strip() == "" or api_key.strip() not in h.text
+        assert c.get("/ui-api/jobs").status_code != 503
+
+
+def test_not_configured_key_logs_error(tmp_path, caplog):
+    with caplog.at_level("ERROR", logger="app.main"):
+        create_app(make_settings(tmp_path, api_key=""))
+    assert any(r.levelname == "ERROR" and "API_KEY" in r.getMessage() for r in caplog.records)
+
+
+def test_valid_key_normal_auth(tmp_path, test_video):
+    with client_for(tmp_path) as c:
+        assert c.get("/healthz").json()["api_key_configured"] is True
+        assert c.get("/api/v1/jobs/whatever").status_code == 401
+        assert c.get("/api/v1/jobs/whatever", headers={"X-API-Key": "wrong"}).status_code == 401
+        assert c.get("/api/v1/jobs/whatever", headers=HDR).status_code == 404  # authorized, unknown job
+        assert upload(c, test_video).status_code == 200
+
+
+def _env_app(monkeypatch, tmp_path, api_key, dev_flag):
+    if api_key is None:
+        monkeypatch.delenv("API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("API_KEY", api_key)
+    if dev_flag:
+        monkeypatch.setenv("API_KEY_DEV_DEFAULT", "1")
+    else:
+        monkeypatch.delenv("API_KEY_DEV_DEFAULT", raising=False)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("RULES_PATH", str(BUNDLED_RULES_PATH))
+    monkeypatch.setenv("UI_PASSWORD", UI_PASS)
+    return create_app()
+
+
+def test_dev_flag_accepts_dev_key(monkeypatch, tmp_path):
+    from app.config import DEV_API_KEY
+    with TestClient(_env_app(monkeypatch, tmp_path, None, True)) as c:
+        assert c.get("/healthz").json()["api_key_configured"] is True
+        assert c.get("/api/v1/jobs/whatever", headers={"X-API-Key": DEV_API_KEY}).status_code == 404
+        assert c.get("/api/v1/jobs/whatever", headers={"X-API-Key": "wrong"}).status_code == 401
+
+
+def test_dev_key_rejected_without_flag(monkeypatch, tmp_path):
+    from app.config import DEV_API_KEY
+    with TestClient(_env_app(monkeypatch, tmp_path, None, False)) as c:
+        assert c.get("/healthz").json()["api_key_configured"] is False
+        r = c.get("/api/v1/jobs/whatever", headers={"X-API-Key": DEV_API_KEY})
+        assert r.status_code == 503 and r.json() == {"detail": NOT_CONFIGURED_DETAIL}
+
+
+def test_real_key_beats_dev_flag(monkeypatch, tmp_path):
+    from app.config import DEV_API_KEY
+    real = "real-key-0123456789abc"
+    with TestClient(_env_app(monkeypatch, tmp_path, real, True)) as c:
+        assert c.get("/api/v1/jobs/whatever", headers={"X-API-Key": real}).status_code == 404
+        assert c.get("/api/v1/jobs/whatever", headers={"X-API-Key": DEV_API_KEY}).status_code == 401
 
 
 def test_unknown_job_404(tmp_path):
@@ -709,6 +788,16 @@ def test_video_range_requests(tmp_path, test_video):
         job_mp4 = upload(c, test_video, name="v.mp4").json()["job_id"]
         r = c.get(f"/ui-api/jobs/{job_mp4}/video", headers={"Range": "bytes=0-1"})
         assert r.status_code == 206 and r.headers["content-type"] == "video/mp4"
+        assert r.content == data[:2] and r.headers["content-length"] == "2"
+        assert r.headers["content-range"] == f"bytes 0-1/{size}"
+
+        # Safari probes with HEAD (full length) and HEAD + Range: bytes=0-1 before playing.
+        r = c.head(url)
+        assert r.status_code == 200 and r.headers["content-length"] == str(size)
+        assert r.headers["accept-ranges"] == "bytes" and r.content == b""
+        r = c.head(url, headers={"Range": "bytes=0-1"})
+        assert r.status_code == 206 and r.headers["content-length"] == "2"
+        assert r.headers["content-range"] == f"bytes 0-1/{size}"
 
 
 def test_static_mount_does_not_shadow_api(tmp_path):
@@ -778,8 +867,7 @@ def test_rules_path_setting_is_used_and_reported(tmp_path, test_video):
     with client_for(tmp_path, analyzer=Q1Analyzer(), rules_path=str(custom)) as c:
         h = c.get("/healthz").json()
         assert h["rules_count"] == 1
-        assert h["rules_path"] == "custom_rules.json"  # outside the service tree: file name only
-        assert str(tmp_path) not in h["rules_path"]
+        assert "rules_path" not in h and str(tmp_path) not in json.dumps(h)  # no filesystem paths
         assert c.get("/ui-api/rules").json()["rules"]["Q1"]["extra"] == 1
         body = wait_done(c, upload(c, test_video).json()["job_id"])
         v = body["violations"][0]
@@ -797,7 +885,7 @@ def test_invalid_rules_path_falls_back_to_bundled(tmp_path, monkeypatch, content
         custom.write_text(content, encoding="utf-8")
     with client_for(tmp_path, rules_path=str(custom)) as c:
         h = c.get("/healthz").json()
-        assert h["rules_path"] == "app/rules.json"  # relative to the service root, no home path
+        assert "rules_path" not in h
         assert h["rules_count"] == len(c.app.state.rules.rules) >= 1
         assert c.app.state.rules.path == BUNDLED_RULES_PATH
 
@@ -809,3 +897,173 @@ def test_ui_static_has_warnings_block_and_no_inner_html():
     assert 'id="warnings-note"' in html and "Предупреждения" in html
     assert "renderWarnings(job.warnings)" in js and "Сила правовой нормы" in js
     assert "innerHTML" not in js.replace("never innerHTML", "")
+
+
+# ---------- meta.procedure (operation steps) promoted to job meta ----------
+
+PROC = {
+    "type": "collection_handover", "title_ru": "Передача инкассации", "confidence": 0.8,
+    "basis_ru": "сумка передана через окно",
+    "steps": [
+        {"id": "bag_check", "title_ru": "Проверка сумки", "status": "violation", "t_sec": 7.27, "type_ids": ["T9"],
+         "rule": "п. 19", "note_ru": "сумка не осмотрена"},
+        {"id": "s2", "title_ru": "Странный", "status": "weird", "t_sec": float("nan"), "type_ids": "T5"},
+        {"id": "s3", "title_ru": "Подпись", "status": "manual", "t_sec": None},
+    ],
+}
+
+
+def test_procedure_meta_validates():
+    from app.worker import procedure_meta
+    out = procedure_meta(PROC)
+    assert out["type"] == "collection_handover" and out["confidence"] == 0.8
+    s1, s2, s3 = out["steps"]
+    assert s1 == {"id": "bag_check", "title_ru": "Проверка сумки", "status": "violation", "t_sec": 7.27,
+                  "type_ids": ["T9"], "rule": None, "rule_url": None, "rule_source": None, "checklist_ids": [],
+                  "note_ru": "сумка не осмотрена"}  # no KB passed -> no norm; detector text dropped
+    assert s2["status"] == "not_checked" and s2["t_sec"] is None and s2["type_ids"] == []
+    assert s3["status"] == "manual" and s3["rule"] is None and s3["note_ru"] is None
+    assert procedure_meta(None) is None and procedure_meta({"steps": []}) is None
+    assert procedure_meta({"title_ru": "x"}) is None and procedure_meta("garbage") is None
+
+
+def test_procedure_rule_derived_from_rules_kb_only():
+    from app.review import CHECKLIST
+    from app.rules import load_rules
+    from app.worker import procedure_meta
+    kb = load_rules(BUNDLED_RULES_PATH)
+    proc = {"title_ru": "x", "steps": [  # real forte-detector step ids
+        {"id": "bag_check", "title_ru": "Сумка", "status": "violation", "type_ids": ["T99", "T9"],
+         "rule": "Инструкция по инкассации, п. 12"},
+        {"id": "authenticity", "title_ru": "Подлинность", "status": "risk", "type_ids": [],
+         "rule": "Выдуманный документ № 1"},
+        {"id": "documents", "title_ru": "Документы", "status": "manual", "type_ids": [], "rule": "что-то"},
+        {"id": "identification", "title_ru": "Идентификация", "status": "ok", "type_ids": ["T15"]},
+        {"id": "client_identified", "title_ru": "Личность", "status": "manual"},
+        {"id": "documents", "title_ru": "Не manual", "status": "ok"},
+        {"id": "bag_amount", "title_ru": "Сумма", "status": "manual", "type_ids": []},
+    ]}
+    out = procedure_meta(proc, "j", kb, CHECKLIST)
+    s1, s2, s3, s4, s5, s6, s7 = out["steps"]
+    cit = kb.rules["T9"].citations[0]  # T99 has no citation: the first id WITH one wins
+    assert s1["rule"] == "НБРК № 231, " + cit.point and s1["rule_url"] == cit.url and s1["rule_source"] == "rules"
+    assert "НБРК № 231" in cit.document
+    # unknown free-text rule is dropped, never stored or displayed
+    assert s2["rule"] is None and s2["rule_source"] is None
+    # documents -> two checklist items, both bases verbatim; the UI focuses the first one
+    by_id = {i["id"]: i for i in CHECKLIST}
+    assert s3["checklist_ids"] == ["cash_doc_signed", "client_got_receipt"] and s3["rule_source"] == "checklist"
+    assert s3["rule"] == ("НБРК № 231, " + by_id["cash_doc_signed"]["basis"] + "; "
+                          + by_id["client_got_receipt"]["basis"])
+    # identification stays rules-derived (T15), not mapped to the checklist
+    t15 = kb.rules["T15"].citations[0]
+    assert s4["rule"] == "НБРК № 231, " + t15.point and s4["rule_source"] == "rules" and s4["checklist_ids"] == []
+    assert s5["rule"] == "НБРК № 231, " + by_id["client_identified"]["basis"]
+    assert s5["checklist_ids"] == ["client_identified"]
+    assert s6["rule"] is None and s6["checklist_ids"] == []  # checklist basis only for manual steps
+    assert s7["rule"] is None  # manual, but no mapping -> no norm
+    assert all("rule_detector" not in s for s in out["steps"])
+    dumped = json.dumps(out, ensure_ascii=False)
+    assert "Инструкция" not in dumped and "Выдуманный" not in dumped and "что-то" not in dumped
+
+
+def test_procedure_meta_caps_steps_and_strings():
+    from app.worker import PROCEDURE_MAX_STEPS, procedure_meta
+    many = {"title_ru": "x", "steps": [{"title_ru": "шаг %d" % i, "status": "ok", "note_ru": "n" * 2000,
+                                        "t_sec": float("inf")} for i in range(100)]}
+    out = procedure_meta(many)
+    assert len(out["steps"]) == PROCEDURE_MAX_STEPS
+    assert all(len(s["note_ru"]) <= 500 for s in out["steps"])
+    assert out["steps"][0]["t_sec"] is None
+
+
+def test_procedure_meta_dropped_above_cap(monkeypatch):
+    import app.worker as w
+    monkeypatch.setattr(w, "PROCEDURE_MAX_BYTES", 200)
+    assert w.procedure_meta(PROC) is None
+
+
+def test_large_procedure_promoted_and_analyzer_meta_kept(tmp_path, test_video):
+    # 7 KB of other analyzer keys + a ~20 KB procedure: together far above the 8 KB analyzer cap.
+    big_steps = [dict(PROC["steps"][0], id="s%d" % i, note_ru="ж" * 499, rule="Выдуманный документ № 7")
+                 for i in range(20)]
+    proc = dict(PROC, steps=big_steps)
+    assert len(json.dumps(proc, ensure_ascii=False).encode("utf-8")) > 20000
+    meta = {"model": "yolo", "blob": "x" * 7000, "procedure": proc}
+    with client_for(tmp_path, analyzer=MetaAnalyzer(meta)) as c:
+        body = wait_done(c, upload(c, test_video).json()["job_id"])
+        assert body["status"] == "done"
+        assert len(body["meta"]["procedure"]["steps"]) == 20
+        st0 = body["meta"]["procedure"]["steps"][0]
+        assert st0["type_ids"] == ["T9"] and st0["rule_source"] == "rules" and st0["rule"].startswith("НБРК № 231, п. 24")
+        assert "rule_detector" not in st0
+        # no unverified detector rule text anywhere in the public or UI job JSON
+        assert "Выдуманный документ" not in json.dumps(body, ensure_ascii=False)
+        ui = c.get(f"/ui-api/jobs/{body['job_id']}").json()
+        assert "Выдуманный документ" not in json.dumps(ui, ensure_ascii=False)
+        assert "rule_detector" not in json.dumps(ui) and "rule_detector" not in json.dumps(body)
+        an = body["meta"]["analyzer"]
+        assert "procedure" not in an and an["model"] == "yolo" and len(an["blob"]) == 7000
+
+
+def test_procedure_survives_oversized_debug_meta(tmp_path, test_video):
+    # ~6 KB procedure + >8 KB of debug keys: analyzer meta dropped as before, procedure still promoted.
+    steps = [dict(PROC["steps"][0], id="s%d" % i, note_ru="ж" * 240) for i in range(10)]
+    proc = dict(PROC, steps=steps)
+    assert 5000 < len(json.dumps(proc, ensure_ascii=False).encode("utf-8")) < 8000
+    meta = {"model": "yolo", "debug": "x" * 9000, "procedure": proc}
+    with client_for(tmp_path, analyzer=MetaAnalyzer(meta)) as c:
+        body = wait_done(c, upload(c, test_video).json()["job_id"])
+        assert body["status"] == "done"
+        assert "analyzer" not in body["meta"]
+        assert len(body["meta"]["procedure"]["steps"]) == 10
+
+
+def test_invalid_procedure_leaves_meta_alone(tmp_path, test_video):
+    with client_for(tmp_path, analyzer=MetaAnalyzer({"model": "yolo", "procedure": "garbage"})) as c:
+        body = wait_done(c, upload(c, test_video).json()["job_id"])
+        assert "procedure" not in body["meta"]
+        assert body["meta"]["analyzer"] == {"model": "yolo"}
+
+
+def test_ui_procedure_panel_and_timeline_static():
+    static = Path(__file__).resolve().parent.parent / "app" / "static"
+    html = (static / "index.html").read_text(encoding="utf-8")
+    js = (static / "app.js").read_text(encoding="utf-8")
+    act = (static / "act.js").read_text(encoding="utf-8")
+    # Panel present but hidden by default; hidden again when meta.procedure is absent.
+    assert 'id="procedure-panel"' in html and 'id="procedure-panel" aria-labelledby="proc-title" hidden' in html
+    assert "if (!pr) { panel.hidden = true; return; }" in js
+    assert "if (pr) sheet.appendChild(section(++no, \"Ход операции\"" in act
+    for word in ("Соблюдено", "Нарушение", "Риск", "Не проверялось", "Проверяется вручную"):
+        assert word in js and word in act
+    assert "не определена" in js and "не определена" in act
+    # Timeline: start label is never the playhead; seeks are clamped below the duration.
+    assert 'id="tl-cur"' in html
+    assert '$("tl-start").textContent = fmtTime(video.currentTime)' not in js
+    assert "Math.min(target, Math.max(0, d - 0.25))" in js
+    assert "innerHTML" not in act.replace("never innerHTML", "")
+    # only worker-derived norms are displayed, never the detector's free text
+    assert 's.rule_source === "rules" || s.rule_source === "checklist"' in js
+    assert 's.rule_source === "rules" || s.rule_source === "checklist"' in act
+    assert "rule_detector" not in js and "rule_detector" not in act
+    # manual step -> scroll to / focus the first mapped checklist item
+    assert '"data-id": id' in js and "focusChecklist(s.checklistIds)" in js
+
+
+def test_failed_job_error_does_not_leak_absolute_paths(tmp_path, test_video):
+    class PathRaiser:
+        name = "path-raiser"
+
+        def analyze(self, video_path, progress_cb, deadline, partial):
+            raise FileNotFoundError(f"[Errno 2] No such file: '/home/kanat/forte/service/data/uploads/abc/Х-17.mov' "
+                                    f"(input {video_path})")
+
+    with client_for(tmp_path, analyzer=PathRaiser()) as c:
+        job_id = upload(c, test_video).json()["job_id"]
+        body = wait_done(c, job_id)
+        assert body["status"] == "failed"
+        assert "/home/" not in body["error"] and str(tmp_path) not in body["error"]
+        assert "Х-17.mov" in body["error"]
+        api = c.get(f"/api/v1/jobs/{job_id}", headers=HDR).json()
+        assert "/home/" not in json.dumps(api, ensure_ascii=False)

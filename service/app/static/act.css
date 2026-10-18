@@ -79,6 +79,10 @@ a { color: inherit; }
 .act-org { display: flex; align-items: center; gap: 10px; font-size: 10.5pt; color: var(--ink-2); }
 .act-org__logo { width: 25mm; height: auto; padding-right: 10px; border-right: 1px solid var(--rule); box-sizing: content-box; }
 .act-org__unit { font-weight: 600; color: var(--brand-800); }
+/* BRAND=neutral: Cash Monitor wordmark (5:1) instead of the Forte logo; the server sets <html data-brand>. */
+html:not([data-brand="neutral"]) .brand-neutral, html[data-brand="neutral"] .brand-forte { display: none !important; }
+.toolbar__logo--neutral { width: 110px; }
+.act-org__logo--neutral { width: 34mm; }
 .act-head__right { font-size: 8.5pt; color: var(--ink-3); text-transform: uppercase; letter-spacing: .6px; white-space: nowrap; }
 
 .act-title {
@@ -151,6 +155,23 @@ a { color: inherit; }
 .grid .c-no { width: 10mm; text-align: center; }
 .grid tr { break-inside: avoid; page-break-inside: avoid; }
 
+/* Manual checklist */
+.cl { margin: 1mm 0 0; padding-left: 6mm; font-size: 10.5pt; }
+.cl__item { padding: 1.4mm 0; border-bottom: 1px dotted #bdbdbd; break-inside: avoid; page-break-inside: avoid; }
+.cl__item:last-child { border-bottom: 0; }
+.cl__row { display: flex; align-items: baseline; justify-content: space-between; gap: 4mm; }
+.cl__label { font-weight: 600; }
+.cl__st { flex: none; font-family: var(--sans); font-size: 9.5pt; font-weight: 700; white-space: nowrap; }
+.cl__st--yes { color: #2a6a45; }
+.cl__st--no { color: #a3211a; text-transform: uppercase; }
+.cl__st--unset { color: var(--ink-3); font-weight: 400; font-style: italic; }
+.cl__item--no .cl__label { color: #a3211a; }
+.cl__basis { margin-top: .6mm; font-size: 9pt; color: var(--ink-2); overflow-wrap: anywhere; }
+.cl__basis a { text-decoration: none; }
+.cl__quote { margin-top: .6mm; font-size: 8.5pt; font-style: italic; color: var(--ink-2); }
+.cl-group { margin: 2.5mm 0 0; font-family: var(--sans); font-size: 10pt; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; color: var(--ink-2); break-after: avoid; page-break-after: avoid; }
+.cl-unset { margin: 1mm 0 0 6mm; font-size: 9.5pt; color: var(--ink-2); }
+.cl-alert { font-weight: 700; color: #a3211a; margin: 1mm 0; font-size: 10.5pt; }
 .concl-stats { font-size: 11pt; }
 .concl-decision { margin-top: 1.5mm; font-size: 11.5pt; }
 .concl-warn { margin-top: 2mm; padding: 1.5mm 3mm; border-left: 3px solid #a3211a; font-size: 10.5pt; font-weight: 700; color: #a3211a; }
@@ -199,3 +220,13 @@ a { color: inherit; }
   a { text-decoration: none; }
   * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }
+
+/* Ход операции (meta.procedure) */
+.proc-op { margin: 0 0 1.5mm; font-weight: 700; }
+.proc-grid td:nth-child(3), .proc-grid td:nth-child(4) { width: 1%; }
+.pst { font-family: var(--sans); font-size: 9.5pt; font-weight: 700; }
+.pst--ok { color: #2a6a45; }
+.pst--bad { color: #a3211a; text-transform: uppercase; }
+.pst--risk { color: #8a5a00; }
+.pst--na { color: var(--ink-3); font-weight: 400; font-style: italic; }
+.pst--manual { color: #1f4e8c; }

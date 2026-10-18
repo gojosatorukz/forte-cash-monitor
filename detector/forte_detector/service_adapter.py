@@ -548,7 +548,41 @@ class ForteAnalyzer:
         if errors:
             m["errors"] = [e[:300] for e in errors[:5]]
         m["warm"] = self.warm_info
-        return m
+        if result is not None:
+            try:  # read-only summary of the cash operation and its steps (does not touch events)
+                from forte_detector.procedure import build_procedure
+
+                m["procedure"] = build_procedure(result)
+            except Exception as e:  # noqa: BLE001
+                log.warning("procedure summary failed: %s", e)
+        return fit_meta(m)
+
+
+SERVICE_META_MAX_BYTES = 8 * 1024  # service worker drops the WHOLE analyzer meta above this
+META_DROP_ORDER = ("warm", "low_conf", "stage_times", "probes_status", "errors")
+
+
+def _json_size(obj) -> int:
+    import json
+
+    return len(json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8"))
+
+
+def fit_meta(m: dict, limit: int = SERVICE_META_MAX_BYTES) -> dict:
+    """Keep the analyzer meta under the service's size cap: drop debug keys first, then procedure
+    step notes, then trailing procedure steps (never the flags the worker reads)."""
+    for k in META_DROP_ORDER:
+        if _json_size(m) <= limit:
+            return m
+        m.pop(k, None)
+    proc = m.get("procedure")
+    if isinstance(proc, dict) and _json_size(m) > limit:
+        for s in proc.get("steps") or []:
+            if s.get("status") == "ok":
+                s["note_ru"] = ""
+        while _json_size(m) > limit and proc.get("steps"):
+            proc["steps"].pop()
+    return m
 
 
 def rotation_meta(orientation: dict | None) -> dict:

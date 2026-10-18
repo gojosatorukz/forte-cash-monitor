@@ -634,3 +634,31 @@ def test_meta_applied_rotation_is_auto_orientation_only(video):
     assert res.meta["applied_rotation_deg"] == 270 and res.meta["container_rotation_deg"] == 90
     res = analyzer(make([], timeline={"orientation": {}})).analyze(video, None, time.monotonic() + 100, FakeSink())
     assert res.meta["applied_rotation_deg"] == 0
+
+
+# ----------------------------------------------------------------------------- procedure in meta
+
+def test_meta_procedure_present_and_events_unchanged(video):
+    import json
+
+    events = [ev(12.0, type="T15"), ev(40.0, type="T5")]
+    res = analyzer(make(events)).analyze(video, None, time.monotonic() + 100, FakeSink())
+    proc = res.meta["procedure"]
+    assert proc["type"] in ("client_operation", "client_deposit", "client_withdrawal", "collection_handover",
+                            "no_client", "unknown")
+    assert len(proc["steps"]) <= 30
+    assert {t for s in proc["steps"] for t in s["type_ids"]} >= {"T15", "T5"}
+    assert [v.type for v in res.violations] == ["T15", "T5"]  # the procedure never touches events
+    assert len(json.dumps(res.meta, ensure_ascii=False, default=str).encode()) <= sa.SERVICE_META_MAX_BYTES
+
+
+def test_fit_meta_drops_debug_keys_before_procedure():
+    import json
+
+    m = {"analyzer": "forte-detector", "stopped_early": False, "warm": {"x": "y" * 9000},
+         "procedure": {"type": "unknown", "steps": [{"id": str(i), "note_ru": "ш" * 300, "status": "ok"}
+                                                    for i in range(30)]}}
+    out = sa.fit_meta(m)
+    assert "warm" not in out and out["stopped_early"] is False
+    assert len(json.dumps(out, ensure_ascii=False).encode()) <= sa.SERVICE_META_MAX_BYTES
+    assert out["procedure"]["steps"]  # trimmed, not dropped

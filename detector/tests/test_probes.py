@@ -7,6 +7,7 @@ import time
 import numpy as np
 import pytest
 
+from forte_detector import video_io
 from forte_detector.probes import cheap, questions, runner, vlm
 from forte_detector.probes.base import CUES, ProbeRequest, ProbeResult
 
@@ -294,6 +295,12 @@ def frames(monkeypatch):
         return img
 
     monkeypatch.setattr(runner, "read_frame_at", fake_read)
+    # camera_blocked reads the clip in one sequential pass (cheap.camera_blocked_series)
+    monkeypatch.setattr(video_io, "iter_frames", lambda path, fps, max_side=None, transform=None: (
+        (float(k), fake_read(path, float(k), transform)) for k in range(10)))
+    monkeypatch.setattr(cheap, "sparse_samples", lambda path, ts, max_side=None, transform=None, until=None: (
+        (float(t), fake_read(path, float(t), transform)) for t in ts))  # bounded pass past the deadline
+    monkeypatch.setattr(runner, "get_client", lambda: FakeVLM(up=False))  # never the real VLM in unit tests
     return reads
 
 
@@ -645,7 +652,7 @@ def test_deadline_skips_vlm_but_runs_cheap_cv(frames, monkeypatch):
     assert fake.calls == []  # no VLM call after the deadline
     assert res[0].value is None and res[0].raw["why"] == "deadline"
     assert res[3].value is None and res[3].raw["why"] == "deadline"
-    assert res[1].value is False  # camera_blocked: cheap, still runs
+    assert res[1].value is False  # camera_blocked: cheap, still runs (bounded pass)
     # door: reference unknown (not in calibration) -> would read ~10 frames -> skipped
     assert res[2].value is None and res[2].raw["why"] == "deadline"
     # with the reference precomputed in the calibration the door probe is cheap and runs
@@ -1088,7 +1095,7 @@ def test_door_roi_source_priority():
     assert runner.door_roi(zone, 5, big_ov, None)[1] == "timeline"  # well-supported doorway zone wins
     roi, src = runner.door_roi(zone, 1, big_ov, None)  # 1-point zone: open-vocab door box instead
     assert src == "openvocab" and roi[1] == pytest.approx(0.018) and roi[3] == pytest.approx(0.51)
-    assert runner.door_roi(zone, 1, None, None)[1] == "timeline_weak"
+    assert runner.door_roi(zone, 1, None, None) == (None, None)  # 1-2-point zone alone: no door (ext12 phantom)
     assert runner.door_roi(None, 0, None, None) == (None, None)
 
 
@@ -1097,6 +1104,29 @@ def test_thin_door_roi_is_rebuilt():
     roi, src = runner.door_roi(thin_zone, 5, None, None)
     assert src.endswith("min_height") or roi[3] - roi[1] >= runner.DOOR_ROI_MIN_H
     assert roi[3] - roi[1] >= runner.DOOR_ROI_MIN_H
+
+
+def test_hands_roi_spans_visitor_and_cashier_or_none():
+    tl = {"series": {"t": [0.0, 1.0], "persons": [
+        [[1, "cashier", [0.4, 0.4, 0.6, 0.7]]],
+        [[1, "cashier", [0.4, 0.4, 0.6, 0.7]], [2, "visitor", [0.1, 0.2, 0.3, 0.6]]]]}}
+    assert runner.hands_roi(tl, 0.0) is None  # nobody to hand anything over to
+    assert runner.hands_roi(tl, 1.1) == [0.1, 0.2, 0.6, 0.7]
+    assert runner.hands_roi(tl, 5.0) is None  # no sample near t
+
+
+def test_banknotes_in_hand_cue_uses_hands_crop(frames, monkeypatch):
+    from forte_detector.probes.base import CUES as ALL_CUES
+
+    assert ALL_CUES[-1] == "banknotes_in_hand" and "banknotes_in_hand" in runner.VLM_CUES
+    fake = FakeVLM()
+    monkeypatch.setattr(runner, "get_client", lambda: fake)
+    tl = {**TL, "series": {**TL["series"], "persons": [[], [[1, "cashier", [0.4, 0.4, 0.6, 0.7]],
+                                                           [2, "visitor", [0.1, 0.2, 0.3, 0.6]]], [], [], []]}}
+    res = runner.run_probes("v.mov", [ProbeRequest("banknotes_in_hand", 1.0)], timeline=tl, calibration={})
+    assert res[0].raw["roi"] == pytest.approx([0.1, 0.2, 0.6, 0.7])
+    res = runner.run_probes("v.mov", [ProbeRequest("banknotes_in_hand", 3.0)], timeline=tl, calibration={})
+    assert res[0].raw["roi"] is None  # no visitor -> full frame
 
 
 def test_autocontrast_stretches_dark_crops_and_keeps_full_range():
@@ -1120,3 +1150,112 @@ def test_screen_crop_is_autocontrasted_other_cues_not(frames, monkeypatch):
     runner.run_probes("v.mov", [ProbeRequest("screen_on_unlocked", 1.0), ProbeRequest("cash_on_desk", 1.0)],
                       timeline=TL, calibration={"laptop": [0.5, 0.5, 0.75, 0.75], "desk": [0.1, 0.4, 0.7, 0.65]})
     assert called == [1]  # only the screen cue
+
+
+# ----------------------------------------------------------------------------- absent zones (ext12 phantom door)
+
+class LowOV(FakeOV):
+    def detect(self, image, queries):
+        h, w = image.shape[:2]
+        # safe below its presence threshold, laptop fine
+        return {"safe": (0.12, [0.7 * w, 0.2 * h, 0.9 * w, 0.5 * h]), "laptop": (0.6, [0.5 * w, 0.4 * h, 0.6 * w, 0.45 * h])}
+
+
+def test_weak_zone_kept_unless_gate_says_close_up(frames, monkeypatch):
+    tl = {**TL, "zones": {"seat": None, "door": [0.0, 0.0, 0.3, 0.4], "door_points": 2}}  # weak zone only
+    # VLM down -> no second signal: the weak safe box is KEPT and flagged; the phantom door is still gone
+    cal = runner.calibrate("v.mov", tl, detector=LowOV())
+    assert cal["safe"] is not None and "safe" in cal["weak"]
+    assert cal["door"] is None and cal["absent"] == ["door"]
+    assert cal["absent_note_ru"] == "зона не найдена: дверь"
+    # confident close-up gate + weak score -> absent; plural note
+    monkeypatch.setattr(runner, "get_client", lambda: FakeVLM(answer=False))
+    cal = runner.calibrate("v.mov", tl, detector=LowOV())
+    assert cal["safe"] is None and set(cal["absent"]) == {"door", "safe"}
+    assert cal["absent_note_ru"].startswith("зоны не найдены:") and "сейф" in cal["absent_note_ru"]
+
+
+def test_openvocab_failure_marks_nothing_absent(frames, monkeypatch):
+    class Bad(FakeOV):
+        def detect(self, image, queries):
+            raise RuntimeError("CUDA OOM")
+
+    fake = FakeVLM()
+    monkeypatch.setattr(runner, "get_client", lambda: fake)
+    cal = runner.calibrate("v.mov", TL, detector=Bad())
+    assert cal["absent"] == [] and "error" in cal["meta"]
+    res = runner.run_probes("v.mov", [ProbeRequest("safe_open", 1.0)], timeline=TL, calibration=cal)
+    assert res[0].value is True and res[0].raw["roi"] is None  # full-frame fallback, as before
+
+
+def test_absent_zone_cues_return_none_without_vlm(frames, monkeypatch):
+    fake = FakeVLM()
+    monkeypatch.setattr(runner, "get_client", lambda: fake)
+    cal = {"absent": ["safe", "door"], "meta": {"door_roi_version": runner.DOOR_ROI_VERSION}, "door": None}
+    res = runner.run_probes("v.mov", [ProbeRequest("safe_open", 1.0), ProbeRequest("door_open", 4.0),
+                                      ProbeRequest("cash_on_desk", 1.0), ProbeRequest("person_count", 1.0)],
+                            timeline=TL, calibration=cal)
+    assert [r.value for r in res[:2]] == [None, None]
+    assert all(r.raw.get("why") == "zone_absent" for r in res[:2])
+    assert res[2].value is True and res[2].raw["roi"] is None  # no desk box = full frame, not absent
+    assert res[3].value is True and [c[0] for c in fake.calls] == ["yesno", "count"]
+
+
+def test_absent_laptop_still_uses_per_frame_coco_laptop(frames, monkeypatch):
+    fake = FakeVLM()
+    monkeypatch.setattr(runner, "get_client", lambda: fake)
+    tl = {**TL, "series": {**TL["series"], "objects": [[], [["laptop", 0.5, 0.5, 0.7, 0.7, 0.9]], [], [], []]}}
+    cal = {"absent": ["laptop"], "laptop": None}
+    res = runner.run_probes("v.mov", [ProbeRequest("screen_on_unlocked", 1.0)], timeline=tl, calibration=cal)
+    assert res[0].value is True and res[0].raw["roi"] == pytest.approx([0.5, 0.5, 0.7, 0.7])
+
+
+def test_room_gate_needs_confidence_or_two_frames(frames, monkeypatch):
+    class Unsure(FakeVLM):
+        def yesno(self, images, prompt, labels=None, max_tokens=None):
+            return False, 0.6, {}
+
+    monkeypatch.setattr(runner, "get_client", lambda: Unsure())
+    read = runner._Frames("v.mov", None)
+    assert runner.room_gate(read, TL) is False  # two frames agree on "no"
+    single = {**TL, "series": {**TL["series"], "t": [0.0], "n_persons": [0]}, "duration": 0.0}
+    assert runner.room_gate(read, single) is None  # one unsure "no" is not enough
+
+
+def test_door_gate_close_up_makes_door_absent(frames, monkeypatch):
+    monkeypatch.setattr(runner, "get_client", lambda: FakeVLM(answer=False))
+    cal = runner.calibrate("v.mov", TL, detector=FakeOV())  # TL has a trusted doorway zone
+    assert cal["door"] is None and cal["meta"]["door_source"] == "vlm_close_up" and "door" in cal["absent"]
+
+
+def test_door_gate_vlm_down_keeps_the_door(frames, monkeypatch):
+    monkeypatch.setattr(runner, "get_client", lambda: FakeVLM(up=False))
+    cal = runner.calibrate("v.mov", TL, detector=FakeOV())
+    assert cal["door"] is not None and cal["meta"]["room_gate"] is None and "door" not in cal["absent"]
+
+
+def test_safe_without_box_in_room_view_is_not_absent(frames, monkeypatch):
+    class NoSafe(FakeOV):
+        def detect(self, image, queries):
+            h, w = image.shape[:2]
+            return {"laptop": (0.6, [0.5 * w, 0.4 * h, 0.6 * w, 0.45 * h])}
+
+    monkeypatch.setattr(runner, "get_client", lambda: FakeVLM(up=False))  # gate None
+    cal = runner.calibrate("v.mov", TL, detector=NoSafe())
+    assert cal["safe"] is None and cal["absent"] == []
+    fake = FakeVLM()
+    monkeypatch.setattr(runner, "get_client", lambda: fake)
+    res = runner.run_probes("v.mov", [ProbeRequest("safe_open", 1.0)], timeline=TL, calibration=cal)
+    assert res[0].value is True and res[0].raw["roi"] is None and fake.calls  # full-frame VLM, as before
+    # with a confident close-up gate, no box -> absent
+    monkeypatch.setattr(runner, "get_client", lambda: FakeVLM(answer=False))
+    cal = runner.calibrate("v.mov", TL, detector=NoSafe())
+    assert "safe" in cal["absent"]
+
+
+def test_stale_calibration_absent_list_is_not_trusted(frames, monkeypatch):
+    fake = FakeVLM()
+    monkeypatch.setattr(runner, "get_client", lambda: fake)
+    old = {"absent": ["safe"], "meta": {"door_roi_version": runner.DOOR_ROI_VERSION - 1}}
+    res = runner.run_probes("v.mov", [ProbeRequest("safe_open", 1.0)], timeline=TL, calibration=old)
+    assert res[0].value is True  # not silenced by an absent list computed under older rules

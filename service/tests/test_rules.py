@@ -198,7 +198,11 @@ T99_TAIL = (". Тип нарушения не определён автомат�
 ])
 def test_real_templates_render_exactly(kb, type_id, obs, expected):
     d = kb.enrich({"type": type_id, "timecode_sec": 57.3, "obs": obs})
-    assert d["description"] == expected
+    assert d["description_text"] == expected
+    if kb.rules[type_id].citations:
+        assert d["description"].startswith(expected + " Основание: ")
+    else:  # no citations -> no grounding sentence
+        assert d["description"] == expected
     if type_id == "T99" and obs:
         assert d["description"].startswith("Наблюдение: на 00:57 кассир передал пачку купюр. ")
 
@@ -224,7 +228,7 @@ def test_description_missing_template_falls_back(tmp_path):
 
 def test_rule_template_wins_over_analyzer_description(kb):
     d = kb.enrich({"type": "T1", "timecode_sec": 57.3, "description": "  Своё описание ", "obs": OBS})
-    assert d["description"] == T1_HEAD + ", " + OBS + T1_TAIL
+    assert d["description_text"] == T1_HEAD + ", " + OBS + T1_TAIL
     assert d["analyzer_description"] == "Своё описание"  # preserved, not lost
 
 
@@ -341,3 +345,40 @@ def test_enrich_passes_legal_strength(kb):
     assert d["legal_strength"] == "medium" and d["legal_conf"] == 0.7
     assert kb.enrich({"type": "T1", "timecode_sec": 1})["legal_strength"] is None
     assert kb.enrich({"type": "T1", "timecode_sec": 1, "legal_strength": "huge"})["legal_strength"] is None
+
+
+# ---------- citation grounding («Основание: …») ----------
+
+NBRK = "Постановление Правления НБРК № 231 от 29.11.2019"
+
+
+def test_grounding_t1_compresses_same_doc(kb):
+    d = kb.enrich({"type": "T1", "timecode_sec": 57.3})
+    assert d["description"] == d["description_text"] + f" Основание: {NBRK}, п. 20 ч. 2; п. 22."
+    assert ".." not in d["description"] and "  " not in d["description"]
+
+
+def test_grounding_t9_from_rules_json(kb):
+    d = kb.enrich({"type": "T9", "timecode_sec": 65})
+    cites = kb.rules["T9"].citations
+    assert len(cites) >= 1
+    assert d["description"].endswith(f" Основание: {NBRK}, {cites[0].point}.")
+    assert d["description"].startswith(d["description_text"])
+
+
+def test_grounding_sentence_rules():
+    from app.rules import append_grounding, grounding_sentence, short_doc_name
+    assert short_doc_name(f"Правила кассовых (\u0441м.) ({NBRK})") == NBRK
+    assert short_doc_name("Закон о банках") == "Закон о банках"
+    cites = [{"document": "Док А", "point": "п. 1"}, {"document": "Док А", "point": "п. 2"},
+             {"document": "Док Б", "point": ""}, {"document": "Док Б", "point": "п. 3."},
+             {"document": "Док А", "point": "п. 4"}]
+    assert grounding_sentence(cites) == "Основание: Док А, п. 1; п. 2; Док Б; п. 3; Док А, п. 4."
+    assert grounding_sentence([]) == ""
+    assert append_grounding("Текст", [{"document": "Д", "point": "п. 5"}]) == "Текст. Основание: Д, п. 5."
+    assert append_grounding("Текст.", []) == "Текст."
+
+
+def test_grounding_unknown_type_unchanged(kb):
+    d = kb.enrich({"type": "ZZZ", "timecode_sec": 1, "description": "своё"})
+    assert d["description"] == "своё" == d["description_text"] and d["rule"] is None

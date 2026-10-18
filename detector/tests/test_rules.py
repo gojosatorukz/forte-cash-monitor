@@ -65,8 +65,11 @@ class Fake:
         return out
 
 
-def run(tl, fake, cfg=None):
-    ctx = E.Ctx(tl, {}, cfg)
+ANCHORED = {"meta": {"desk_source": "laptop+counting_machine"}}
+
+
+def run(tl, fake, cfg=None, cal=None):
+    ctx = E.Ctx(tl, cal if cal is not None else {}, cfg)
     events = []
     for item in E.plan(ctx):
         res = fake("v.mov", item.requests, timeline=tl)
@@ -141,6 +144,107 @@ def test_t1b_t4_t3_at_departure():
     assert types(run(departure_tl(), Fake(stamps_or_journal_on_desk=True))) == ["T1b"]
     assert types(run(departure_tl(), Fake(screen_on_unlocked=True))) == ["T4"]
     assert types(run(departure_tl(), Fake(key_in_safe=True))) == ["T3"]
+
+
+class PYesFake(Fake):
+    """Fake that also reports the VLM's p(yes) for key_in_safe (real runs: raw["p_yes"] from logprobs)."""
+
+    def __init__(self, p_yes, **answers):
+        super().__init__(**answers)
+        self.p_yes = p_yes
+
+    def __call__(self, video_path, requests, **kw):
+        out = super().__call__(video_path, requests, **kw)
+        for r in out:
+            if r.cue == "key_in_safe" and self.p_yes is not None:
+                r.raw["p_yes"] = self.p_yes
+        return out
+
+
+SAFE_CAL = {"safe": [0.41, 0.3, 0.57, 0.42], "absent": []}
+
+
+GATED = E.RulesConfig(t3_fallback_pyes=0.0015)  # the old p(yes)-gated fallback (FORTE_T3_FALLBACK_PYES>0)
+
+
+def assert_hint(ev):
+    assert types(ev) == ["T3"]
+    e = ev[0]
+    assert e.fact_conf == pytest.approx(0.3) and e.confidence >= E.RulesConfig().verdict_threshold
+    assert e.obs == "проверьте сейф: дверца или ключ" and "проверьте сейф" in e.description_ru
+    assert e.source.endswith(":t3_fallback") and 10.0 <= e.timecode_sec <= 11.5
+    assert E.verdict(ev)
+    return e
+
+
+def test_t3_fallback_default_is_unconditional():
+    assert E.RulesConfig().t3_fallback_pyes == 0
+
+
+def test_t3_fallback_gated_low_confidence_on_departure():  # X-22: key in the lock, VLM says "no" (p_yes 0.0027)
+    assert_hint(run(departure_tl(), PYesFake(0.0027, key_in_safe=(False, 0.9973)), cfg=GATED, cal=SAFE_CAL))
+
+
+def test_t3_fallback_gated_hard_negatives():  # X-12 / X-23 / X-25 / X-27 / X-29: clean exits, p_yes <= 0.001
+    assert run(departure_tl(), PYesFake(0.0002, key_in_safe=(False, 0.9998)), cfg=GATED, cal=SAFE_CAL) == []
+    assert run(departure_tl(), PYesFake(0.001, key_in_safe=(False, 0.999)), cfg=GATED, cal=SAFE_CAL) == []
+    # no logprobs (p_yes unknown) -> no hint
+    assert run(departure_tl(), PYesFake(None), cfg=GATED, cal=SAFE_CAL) == []
+
+
+@pytest.mark.parametrize("cfg", [None, GATED])
+def test_t3_fallback_needs_visible_safe_and_empty_room(cfg):
+    # safe zone not visible: absent, or no safe ROI at all
+    assert run(departure_tl(), PYesFake(0.0027), cfg=cfg, cal={"safe": None, "absent": ["safe"]}) == []
+    assert run(departure_tl(), PYesFake(0.0027), cfg=cfg, cal={**SAFE_CAL, "absent": ["safe"]}) == []
+    assert run(departure_tl(), PYesFake(0.0027), cfg=cfg, cal={}) == []
+    # room not empty at the departure probe -> no departure, no hint
+    assert run(departure_tl(), PYesFake(0.0027, person_count=count(1)), cfg=cfg, cal=SAFE_CAL) == []
+
+
+def run_without(tl, fake, drop_cue, cfg=None, cal=None):
+    """run() with every probe of drop_cue missing from the pairs (unanswered / budget-skipped)."""
+    ctx = E.Ctx(tl, cal if cal is not None else {}, cfg)
+    events = []
+    for item in E.plan(ctx):
+        res = fake("v.mov", item.requests, timeline=tl)
+        pairs = [(q, r) for q, r in zip(item.requests, res) if q.cue != drop_cue]
+        events += item.rule.decide(ctx, pairs)
+    return E.finalize(events, ctx.cfg)
+
+
+def test_t3_fallback_unconditional_fires_on_clean_exit():  # option B: "no" with a tiny p_yes still fires
+    e = assert_hint(run(departure_tl(), PYesFake(0.0002, key_in_safe=(False, 0.9998)), cal=SAFE_CAL))
+    assert e.extra["gate"] == "unconditional" and e.extra["p_yes"] == pytest.approx(0.0002)
+    assert_hint(run(departure_tl(), PYesFake(0.0027, key_in_safe=(False, 0.9973)), cal=SAFE_CAL))
+
+
+def test_t3_fallback_unconditional_without_p_yes():  # no logprobs -> still fires
+    assert_hint(run(departure_tl(), PYesFake(None), cal=SAFE_CAL))
+    assert_hint(run(departure_tl(), Fake(), cal=SAFE_CAL))
+
+
+def test_t3_fallback_unconditional_unanswered_probe():  # key_in_safe answered None (VLM failed)
+    assert_hint(run(departure_tl(), PYesFake(None, key_in_safe=(None, 0.0)), cal=SAFE_CAL))
+
+
+def test_t3_fallback_unconditional_missing_probe_uses_departure_time():
+    ev = run_without(departure_tl(), PYesFake(None), "key_in_safe", cal=SAFE_CAL)
+    e = assert_hint(ev)
+    assert e.end_sec == pytest.approx(e.timecode_sec)
+    # the gated variant needs the probe's p_yes -> nothing
+    assert run_without(departure_tl(), PYesFake(0.0027), "key_in_safe", cfg=GATED, cal=SAFE_CAL) == []
+
+
+@pytest.mark.parametrize("cfg", [None, GATED])
+def test_t3_fallback_does_not_duplicate_strong_path(cfg):
+    for strong in ({"key_in_safe": True}, {"safe_open": True}):
+        ev = run(departure_tl(), PYesFake(0.9, **strong), cfg=cfg, cal=SAFE_CAL)
+        t3 = [e for e in ev if e.type == "T3"]
+        assert len(t3) == 1 and not t3[0].source.endswith(":t3_fallback") and t3[0].fact_conf > 0.5
+    # another type at the departure keeps its event; the T3 hint is added beside it
+    ev = run(departure_tl(), PYesFake(0.0027, screen_on_unlocked=True), cfg=cfg, cal=SAFE_CAL)
+    assert types(ev) == ["T3", "T4"]
 
 
 def test_low_confidence_probe_is_ignored():
@@ -222,7 +326,7 @@ def test_t99_unexplained_access_is_low_confidence():
     tl["series"]["cashier_present"] = [t < 6 for t in tl["series"]["t"]]
     ctx = E.Ctx(tl)
     ev = E.UnexplainedAccessRule().decide(ctx, [])
-    assert [e.type for e in ev] == ["T99"] and ev[0].obs and not E.verdict(ev)
+    assert [e.type for e in ev] == ["T99"] and ev[0].obs and ev[0].fact_conf <= 0.3 and E.verdict(ev)
     tl["series"]["cashier_present"] = [True] * len(tl["series"]["t"])  # cashier there: normal service
     assert E.UnexplainedAccessRule().decide(E.Ctx(tl), []) == []
 
@@ -234,18 +338,64 @@ def _only_weak(evs, type_id):
     return evs[0]
 
 
-def test_t13_phone_two_of_three_is_weak():  # X-5 / X-48: two hits (desk phone?) -> weak, low fact_conf
-    tl = make_tl(25.0, tracks=[(1, 0, 25)])
+PH_CAL = {"desk": [0.2, 0.3, 0.7, 0.6]}  # calibrated desk ROI (one desk crop per checkpoint)
+
+
+def phone_tl(duration=25.0, visitor=True):
+    tl = make_tl(duration, tracks=[(1, 0, duration)] + ([(7, 0, duration)] if visitor else []))
     n = len(tl["series"]["t"])
-    person = [1, "cashier", [0.3, 0.3, 0.6, 0.9]]
-    tl["series"]["persons"] = [[person]] * n
-    # phone lying on the desk (outside every person box): the weak answer is not corroborated
-    tl["series"]["objects"] = [[["cell phone", 0.7, 0.1, 0.75, 0.15, 0.8]]] * n
-    assert run(tl, Fake(phone_visible=lambda r: (r.t < 20, 1.0))) == []
-    # phone held by the cashier (inside the person box): weak T13
-    tl["series"]["objects"] = [[["cell phone", 0.4, 0.5, 0.45, 0.55, 0.8]]] * n
-    _only_weak(run(tl, Fake(phone_visible=lambda r: (r.t < 20, 1.0))), "T13")
-    assert run(tl, Fake(phone_visible=lambda r: (r.t < 12, 1.0))) == []  # a single hit is nothing
+    row = [[1, "cashier", [0.3, 0.3, 0.6, 0.9], False], [5, "cashier", [0.0, 0.0, 0.05, 0.04], False]]
+    if visitor:
+        row += [[7, "visitor", [0.6, 0.2, 0.85, 0.85], False], [9, "visitor", [0.0, 0.0, 0.1, 0.1], True]]
+    tl["series"]["persons"] = [row] * n
+    tl["series"]["objects"] = [[]] * n
+    return tl
+
+
+def test_t13_phone_requests_cashier_and_desk_crops():
+    tl = phone_tl(60.0)
+    reqs = [r for r in E.plan(E.Ctx(tl, PH_CAL)) if r.rule.name == "phone"][0].requests
+    assert len(reqs) == 12 and len({r.t for r in reqs}) == 6
+    held = [r for r in reqs if r.cue == "phone_held"]
+    assert len(held) == 6 and all(r.roi == (0.3, 0.3, 0.6, 0.9) for r in held)  # never visitors / fragments
+    assert [r.roi for r in reqs if r.cue == "phone_on_desk"] == [None] * 6
+    # nobody in the room, close-up (e2_27): 2x2 zoomed desk tiles at 3 checkpoints
+    tl = make_tl(11.0, tracks=[], cashier=())
+    for cal in ({}, {"desk": [0.0, 0.0, 1.0, 1.0]}):
+        reqs = E.PhoneRule().propose(E.Ctx(tl, cal))
+        assert len(reqs) == 12 and {r.roi for r in reqs} == set(E.PhoneRule.TILES)
+
+
+def test_t13_persistent_answers_fire():
+    tl = phone_tl()  # 3 checkpoints
+    ev = run(tl, Fake(phone_held=lambda r: (r.t < 20, 0.7)), cal=PH_CAL)  # cashier 2/3 moments
+    e = _only_weak(ev, "T13")
+    assert e.obs == "кассир держит мобильный телефон" and e.timecode_sec == min(e.evidence_ts)
+    ev = run(tl, Fake(phone_on_desk=(True, 0.9)), cal=PH_CAL)  # desk at every checkpoint
+    assert types(ev) == ["T13"] and ev[0].extra["strength"] == "medium" and ev[0].obs == "на столе лежит мобильный телефон"
+    tiles = make_tl(11.0, tracks=[], cashier=())  # close-up: any tile per moment
+    ev = run(tiles, Fake(phone_on_desk=lambda r: (r.roi == E.PhoneRule.TILES[2], 0.9)))
+    assert types(ev) == ["T13"]
+
+
+def test_t13_hard_negatives():  # scattered answers of the 4B VLM on clean training clips
+    tl = phone_tl(60.0)  # 6 checkpoints
+    assert run(tl, Fake(phone_held=lambda r: (r.t in (15.0, 45.0), 1.0)), cal=PH_CAL) == []  # cashier 2/6
+    assert run(tl, Fake(phone_held=lambda r: (r.t < 6, 1.0)), cal=PH_CAL) == []  # a single moment
+    tl = phone_tl()
+    assert run(tl, Fake(phone_on_desk=lambda r: (r.t < 20, 1.0)), cal=PH_CAL) == []  # desk 2/3 (X-5 client phone)
+    assert run(tl, Fake(phone_held=(True, 0.55), phone_on_desk=(True, 0.55)), cal=PH_CAL) == []  # below 0.6
+
+
+def test_t13_coco_only_raises_confidence():
+    tl = phone_tl(visitor=False)
+    fake = Fake(phone_held=lambda r: (r.t < 20, 0.7))
+    base = run(tl, fake, cal=PH_CAL)[0]
+    n = len(tl["series"]["t"])
+    tl["series"]["objects"] = [[["cell phone", 0.4, 0.5, 0.45, 0.55, 0.8]]] * n  # inside the cashier box
+    boosted = run(tl, fake, cal=PH_CAL)[0]
+    assert boosted.extra["coco"] and boosted.fact_conf > base.fact_conf
+    assert run(tl, Fake(), cal=PH_CAL) == []  # COCO alone never fires
 
 
 def test_t10_alone_is_weak():  # X-35 / X-2 (0.737): one hand cue, ID shown -> weak T10
@@ -332,14 +482,29 @@ def test_t11_t12_t13_need_two_hits():
     tl = make_tl(25.0, tracks=[(1, 0, 25)])
     assert types(run(tl, Fake(handbag_or_coat_on_desk=True))) == ["T11"]
     assert types(run(tl, Fake(cup_or_food=lambda r: (r.t > 12, 0.9)))) == ["T12"]
-    assert types(run(tl, Fake(phone_visible=True))) == ["T13"]
+    assert types(run(tl, Fake(phone_on_desk=True))) == ["T13"]
 
 
 def test_t11_t12_single_hit_is_weak():
     tl = make_tl(25.0, tracks=[(1, 0, 25)])
-    _only_weak(run(tl, Fake(handbag_or_coat_on_desk=lambda r: (r.t > 24, 0.9))), "T11")
-    _only_weak(run(tl, Fake(cup_or_food=lambda r: (r.t < 12, 0.9))), "T12")
-    assert run(tl, Fake(cup_or_food=(True, 0.3))) == []  # below the answer bar
+    _only_weak(run(tl, Fake(handbag_or_coat_on_desk=lambda r: (r.t > 24, 0.9)), cal=ANCHORED), "T11")
+    _only_weak(run(tl, Fake(cup_or_food=lambda r: (r.t < 12, 0.9)), cal=ANCHORED), "T12")
+    assert run(tl, Fake(cup_or_food=(True, 0.3)), cal=ANCHORED) == []  # below the answer bar
+
+
+def test_t11_t12_single_hit_needs_anchored_desk():  # external2: fallback desk ROI swallows counters
+    tl = make_tl(25.0, tracks=[(1, 0, 25)])
+    for cal in ({}, {"meta": {"desk_source": "openvocab_near_seat"}}, {"meta": {"desk_source": "coco_laptop"}}):
+        assert run(tl, Fake(handbag_or_coat_on_desk=lambda r: (r.t > 24, 0.9)), cal=cal) == []
+        assert run(tl, Fake(cup_or_food=lambda r: (r.t < 12, 0.9)), cal=cal) == []
+    # strong path (2+ separate moments) is unchanged without an anchor
+    assert types(run(tl, Fake(cup_or_food=lambda r: (r.t > 12, 0.9)))) == ["T12"]
+
+
+def test_t11_t12_strong_needs_separate_moments():
+    tl = make_tl(9.0, tracks=[(1, 0, 9)])  # tail probes 4.5 / 7.2 / 8.5: last two < 3 s apart
+    ev = run(tl, Fake(handbag_or_coat_on_desk=lambda r: (r.t > 7, 0.9)), cal=ANCHORED)
+    assert ev and ev[0].extra["strength"] == "weak"
 
 
 def test_coco_only_fallback_stays_below_threshold():  # VLM down: COCO "handbag" on a jacket
@@ -394,7 +559,7 @@ def test_t10_t15_hard_negative():  # X-3 / X-1: ID shown, free hand open
 def test_t15_procedure_aware():  # human review round 2: X-2, X-19, X-35, X-37, X-39 vs collectors
     tl = service_tl()  # client 2-17, reaches the desk at 9.3
     a, b = E.ServiceRule.id_window(E.Ctx(tl).visits[0])
-    assert a < 9.3 < b <= 11.0  # the ID must be shown before / at the cash acceptance
+    assert a < 9.3 < b <= 13.5  # the ID check runs up to ~4 s after the client reaches the desk
     ev = run(tl, Fake(id_document_shown=False))
     t15 = [e for e in ev if e.type == "T15"]
     assert t15 and t15[0].timecode_sec == 9.3 and t15[0].fact_conf <= 0.55 and E.verdict(t15)
@@ -426,7 +591,21 @@ def test_weak_paths_clear_threshold_at_no_logprob_conf():  # review I1: VLM conf
     assert t7 and E.verdict(t7)  # weak T7 (count while the client leaves)
     for fake in (Fake(cash_in_hand_to_body=lambda r: (r.t > 10, c)), Fake(cup_or_food=lambda r: (r.t < 12, c))):
         tlx = service_tl() if "cash_in_hand_to_body" in fake.answers else make_tl(25.0, tracks=[(1, 0, 25)])
-        assert E.verdict(run(tlx, fake))
+        assert E.verdict(run(tlx, fake, cal=ANCHORED))
+
+
+def test_weak_answer_conf_floor():  # X-13 reencode: weak T2 from one "yes" at conf 0.58 -> 0.231 < 0.25
+    tl = client_change_tl()
+    ev = [e for e in run(tl, Fake(cash_on_desk=lambda r: (57 < r.t < 59, 0.58))) if e.type == "T2"]
+    assert ev and ev[0].extra["strength"] == "weak" and E.verdict(ev)
+    assert E.weak_fact(0.58) == E.weak_fact(0.7) < E.weak_fact(0.95)
+
+
+def test_t7_second_after_count_absorbs_late_exit():  # X-34 reencode: client still visible at exit+1.5 s
+    tl = short_visit_tl()  # visitor 3-13
+    fake = Fake(person_count=lambda r: (None, 0.9, 2 if r.t < 15.0 else 1), counting_machine_used=True)
+    ev = run(tl, fake)
+    assert "T7" in types(ev)
 
 
 def test_t15_id_answer_on_banknotes_does_not_count():  # PC run: id:1 "yes" = the cash hand-over
@@ -436,6 +615,179 @@ def test_t15_id_answer_on_banknotes_does_not_count():  # PC run: id:1 "yes" = th
     assert "T15" not in types(run(tl, Fake(id_document_shown=late)))  # real ID (no cash yet)
     ev = [e for e in run(tl, Fake(id_document_shown=late, cash_on_desk=late)) if e.type == "T15"]
     assert ev and ev[0].extra["id_answer_was_banknotes"] and ev[0].fact_conf <= E.WEAK_FACT
+
+
+def test_t15_veto_needs_cash_at_the_same_frame():  # release review (a)/(b)
+    tl = service_tl()
+    rule = E.ServiceRule()
+    v = E.Ctx(tl).visits[0]
+    t4, t5, tb = rule.late_ts(E.Ctx(tl), v)
+    at = lambda *ts: (lambda r: (any(abs(r.t - x) < 1e-6 for x in ts), 0.99))  # noqa: E731
+    # ID "yes" at a+5w, cash "yes" only at b: the ID is real -> no veto, no T15
+    assert "T15" not in types(run(tl, Fake(id_document_shown=at(t5), cash_on_desk=at(tb))))
+    # compliant client: cash on the desk, then a real ID late in the window -> no T15
+    assert "T15" not in types(run(tl, Fake(id_document_shown=at(t4, t5), cash_on_desk=at(t4))))
+    # every late "yes" is banknotes at the same frame -> T15, capped at the weak level
+    ev = [e for e in run(tl, Fake(id_document_shown=at(t5), cash_on_desk=at(t5))) if e.type == "T15"]
+    assert ev and ev[0].fact_conf <= E.weak_fact(1.0) and ev[0].extra["vetoed_id_frames"] == [t5]
+
+
+def test_t15_unsure_single_yes_is_not_a_document():  # X-19 prod: one "yes" at 0.63 during the hand-over
+    tl = service_tl()
+    t4, t5, tb = E.ServiceRule().late_ts(E.Ctx(tl), E.Ctx(tl).visits[0])
+    unsure = lambda r: (True, 0.63) if abs(r.t - t4) < 1e-6 else (False, 0.95)  # noqa: E731
+    ev = [e for e in run(tl, Fake(id_document_shown=unsure)) if e.type == "T15"]
+    assert ev and ev[0].fact_conf <= E.weak_fact(1.0) and E.verdict(ev)
+    sure = lambda r: (True, 0.9) if abs(r.t - t4) < 1e-6 else (False, 0.95)  # noqa: E731
+    assert "T15" not in types(run(tl, Fake(id_document_shown=sure)))  # a confident "yes" is a document
+
+
+def test_vlm_budget_defaults_for_5080():
+    cfg = E.RulesConfig()
+    assert cfg.max_vlm_requests == 70 and cfg.max_vlm_total == 90 and cfg.max_vlm_total > cfg.max_vlm_requests
+
+
+def test_full_staged_cash_veto_only_where_id_said_yes(monkeypatch):
+    from forte_detector.analyzers import full
+
+    tl = service_tl()
+    monkeypatch.setattr(full, "perceive", lambda *a, **k: dict(tl, meta={"cached": True}))
+    t4, t5, tb = E.ServiceRule().late_ts(E.Ctx(tl), E.Ctx(tl).visits[0])
+    fake = Fake(id_document_shown=lambda r: (abs(r.t - t5) < 1e-6, 0.99), cash_on_desk=True)
+    full.analyze("X-2.mov", runner=fake, calibrate_fn=lambda *a: {})
+    cash_ts = sorted(c.t for c in fake.calls if c.cue == "cash_on_desk" and c.context.get("rule") == "service")
+    assert cash_ts == [t5]
+
+
+@pytest.fixture
+def with_banknote_cue(monkeypatch):
+    from forte_detector.probes import base
+
+    monkeypatch.setattr(base, "CUES", tuple(base.CUES) + ((E.BANKNOTE_CUE,) if E.BANKNOTE_CUE not in base.CUES else ()))
+    import tests.test_rules as me
+
+    monkeypatch.setattr(me, "CUES", base.CUES)
+    return base.CUES
+
+
+def test_t15_banknotes_in_hand_veto(with_banknote_cue):  # X-19 / X-35: hand-over read as an "ID"
+    tl = service_tl()
+    ts = E.ServiceRule().id_ts(E.Ctx(tl), E.Ctx(tl).visits[0])
+    at = lambda *xs: (lambda r: (any(abs(r.t - x) < 1e-6 for x in xs), 0.98))  # noqa: E731
+    # confident "ID" at the hand-over frame, banknotes in hand at the same frame -> vetoed -> weak T15
+    ev = [e for e in run(tl, Fake(id_document_shown=at(ts[3]), banknotes_in_hand=at(ts[3]))) if e.type == "T15"]
+    assert ev and ev[0].extra["vetoed_id_frames"] == [ts[3]] and ev[0].fact_conf <= E.weak_fact(1.0)
+    # banknotes in hand only at another frame -> the ID frame stands -> no T15 (X-5/X-48 stay clean)
+    assert "T15" not in types(run(tl, Fake(id_document_shown=at(ts[3]), banknotes_in_hand=at(ts[4]))))
+
+
+def test_t15_banknote_cue_asked_only_where_id_said_yes(monkeypatch, with_banknote_cue):
+    from forte_detector.analyzers import full
+
+    tl = service_tl()
+    monkeypatch.setattr(full, "perceive", lambda *a, **k: dict(tl, meta={"cached": True}))
+    ts = E.ServiceRule().id_ts(E.Ctx(tl), E.Ctx(tl).visits[0])
+    fake = Fake(id_document_shown=lambda r: (abs(r.t - ts[2]) < 1e-6, 0.99), banknotes_in_hand=True)
+    full.analyze("X-19.mov", runner=fake, calibrate_fn=lambda *a: {})
+    asked = sorted(c.t for c in fake.calls if c.cue == E.BANKNOTE_CUE)
+    assert asked == [ts[2]]
+
+
+def test_banknote_cue_absent_is_not_requested():
+    from forte_detector.probes import base
+
+    if E.BANKNOTE_CUE in base.CUES:
+        pytest.skip("cue landed")
+    reqs = [r for item in E.plan(E.Ctx(service_tl())) for r in item.requests]
+    assert all(r.cue != E.BANKNOTE_CUE for r in reqs)
+
+
+def test_t15_unsure_no_does_not_block():  # X-1 @566633b: one "no" at 0.59 among clear "no"s
+    tl = service_tl()
+    ts = E.ServiceRule().id_ts(E.Ctx(tl), E.Ctx(tl).visits[0])
+    ans = lambda r: (False, 0.59) if abs(r.t - ts[3]) < 1e-6 else (False, 0.99)  # noqa: E731
+    assert "T15" in types(run(tl, Fake(id_document_shown=ans)))
+
+
+def test_t10_third_hand_window():  # X-2: answer varies run to run; a third offset window adds margin
+    tl = service_tl()
+    v = E.Ctx(tl).visits[0]
+    t3 = round(v.start + 0.5 * v.dwell, 2)
+    ev = run(tl, Fake(cash_in_hand_to_body=lambda r: (abs(r.t - t3) < 1e-6, 0.8)))
+    assert "T10" in types(ev) and E.verdict(ev)
+
+
+def _crowd_tl(extra_rows):
+    tl = make_tl(20.0, tracks=[(1, 0, 20)], n_persons=lambda t: 1)
+    rows = []
+    for t in tl["series"]["t"]:
+        row = [[1, "cashier", [0.3, 0.3, 0.4, 0.7], False]]
+        if 5.0 <= t <= 10.0:
+            row += extra_rows
+        rows.append(row)
+    tl["series"]["persons"] = rows
+    return tl
+
+
+def test_t6_weak_crowd_from_perception():  # external intruders: VLM count undercounts crowds
+    two = [[5, "visitor", [0.5, 0.3, 0.6, 0.68], False], [6, "visitor", [0.6, 0.3, 0.7, 0.7], False]]
+    tl = _crowd_tl(two)
+    ev = [e for e in run(tl, Fake(person_count=count(2))) if e.type == "T6"]
+    assert ev and ev[0].extra["strength"] == "weak" and E.verdict(ev) and ev[0].timecode_sec == 5.0
+    ev3 = [e for e in run(tl, Fake(person_count=count(3))) if e.type == "T6"]
+    assert ev3 and ev3[0].extra["strength"] == "medium" and ev3[0].fact_conf > ev[0].fact_conf
+    assert "T6" not in types(run(tl, Fake(person_count=count(1))))  # VLM sees nobody else: phantoms
+
+
+def test_t6_crowd_review_fixes():
+    two = [[5, "visitor", [0.5, 0.3, 0.6, 0.68], False], [6, "visitor", [0.6, 0.3, 0.7, 0.7], False]]
+    tl = _crowd_tl(two)
+    # veto only on 0, or 1 at conf >= 0.8
+    assert "T6" in types(run(tl, Fake(person_count=lambda r: (False, 0.6, 1))))
+    assert "T6" not in types(run(tl, Fake(person_count=lambda r: (False, 0.9, 0))))
+    # the probe goes to the peak frame
+    rows = tl["series"]["persons"]
+    i_peak = tl["series"]["t"].index(8.0)
+    rows[i_peak] = rows[i_peak] + [[7, "visitor", [0.7, 0.3, 0.8, 0.7], False]]
+    reqs = E.CrowdRule().propose(E.Ctx(tl))
+    assert [r.t for r in reqs] == [8.0]
+    # medium >= weak, and the >= 3 answer needs min_probe_conf
+    med = [e for e in run(tl, Fake(person_count=lambda r: (True, 0.5, 3))) if e.type == "T6"]
+    assert med and med[0].fact_conf >= E.weak_fact(0.5)
+    low = [e for e in run(tl, Fake(person_count=lambda r: (True, 0.3, 3))) if e.type == "T6"]
+    assert low and low[0].extra["strength"] == "weak"
+    # no cashier track: in-room people's median height is the reference
+    tl2 = _crowd_tl(two)
+    for row in tl2["series"]["persons"]:
+        for r in row:
+            r[1] = "visitor"
+    assert "T6" in types(run(tl2, Fake(person_count=count(2))))
+    # over the VLM budget: weak perception-only event instead of nothing
+    cfg = E.RulesConfig(max_vlm_requests=0)
+    ev = run(tl, Fake(), cfg=cfg)
+    assert [e.type for e in ev] == ["T6"] and ev[0].extra["vlm_count"] is None and E.verdict(ev, cfg)
+
+
+def test_full_crowd_over_hard_cap_still_emits_weak(monkeypatch):
+    from forte_detector.analyzers import full
+
+    tl = _crowd_tl([[5, "visitor", [0.5, 0.3, 0.6, 0.68], False], [6, "visitor", [0.6, 0.3, 0.7, 0.7], False]])
+    monkeypatch.setattr(full, "perceive", lambda *a, **k: dict(tl, meta={"cached": True}))
+    r = full.analyze("X-30.mov", runner=Fake(), calibrate_fn=lambda *a: {}, cfg=E.RulesConfig(max_vlm_total=0))
+    assert "T6" in types(r.events)
+
+
+def test_t6_crowd_hard_negatives():  # X-15 / ext12: arm fragments, people behind the glass, short
+    arms = [[5, "visitor", [0.5, 0.3, 0.55, 0.45], False], [6, "visitor", [0.6, 0.3, 0.65, 0.4], False]]
+    assert "T6" not in types(run(_crowd_tl(arms), Fake(person_count=count(2))))
+    glass = [[5, "visitor", [0.5, 0.3, 0.6, 0.68], True], [6, "visitor", [0.6, 0.3, 0.7, 0.7], True]]
+    assert "T6" not in types(run(_crowd_tl(glass), Fake(person_count=count(2))))
+    tl = _crowd_tl([[5, "visitor", [0.5, 0.3, 0.6, 0.68], False], [6, "visitor", [0.6, 0.3, 0.7, 0.7], False]])
+    rows = tl["series"]["persons"]
+    for i, t in enumerate(tl["series"]["t"]):
+        if t > 6.5:
+            rows[i] = rows[i][:1]  # crowd for only 1.5 s
+    assert "T6" not in types(run(tl, Fake(person_count=count(2))))
 
 
 def test_t15_needs_decided_id_answers():  # review M5: an undecided ID probe never makes a T15
@@ -737,7 +1089,7 @@ def test_obs_adds_specifics_only_never_restates_template():
         (short_visit_tl(), Fake(person_count=visit_count, bag_on_desk=True)),
         (door_tl(), Fake(door_open=True)),
         (make_tl(11.5, tracks=[(1, 0, 11.5)]), Fake(safe_open=True)),
-        (make_tl(25.0, tracks=[(1, 0, 25)]), Fake(handbag_or_coat_on_desk=True, cup_or_food=True, phone_visible=True)),
+        (make_tl(25.0, tracks=[(1, 0, 25)]), Fake(handbag_or_coat_on_desk=True, cup_or_food=True, phone_on_desk=True)),
         (make_tl(20.0, tracks=[(1, 0, 20)]), Fake(camera_blocked=True)),
         (service_tl(), Fake(cash_in_hand_to_body=True, id_document_shown=False)),
     ]
@@ -772,12 +1124,12 @@ def test_persistent_state_missing_probes_never_lower_the_bar():  # review #2
     ctx = E.Ctx(tl)
     rule = [r for r in E.default_rules() if r.name == "phone"][0]
     reqs = rule.propose(ctx)[:1]  # only 1 of the 3 planned probes was run
-    res = Fake(phone_visible=(True, 1.0))("v.mov", reqs, timeline=tl)
+    res = Fake(phone_on_desk=(True, 0.9))("v.mov", reqs, timeline=tl)
     assert rule.decide(ctx, list(zip(reqs, res))) == []
 
 
 def test_full_cap_drops_whole_rule_groups(patched_full):  # review #2
-    fake = Fake(phone_visible=(True, 1.0))
+    fake = Fake(phone_on_desk=(True, 1.0))
     r = patched_full.analyze("X-24.mov", runner=fake, calibrate_fn=lambda *a: {},
                              cfg=E.RulesConfig(max_vlm_total=1))
     assert all(e.type != "T13" for e in r.events)
@@ -887,6 +1239,15 @@ def test_door_t6_served_client_is_not_an_outsider():  # review minor
     tl["checkpoints"].sort(key=lambda c: c["t"])
     assert types(run(tl, Fake(door_open=True))) == ["T5"]  # 2 people, entrant sits at the desk
     assert types(run(tl, Fake(door_open=True, person_count=count(3)))) == ["T5", "T6"]
+
+
+def test_t99_fact_configurable():  # default below the threshold; t99_fact=0.3 makes it count
+    tl = make_tl(20.0, cps=[("visitor_arrives_at_desk", 10.0, [5])], tracks=[(1, 0, 6), (5, 8, 20)])
+    tl["series"]["cashier_present"] = [t < 6 for t in tl["series"]["t"]]
+    low = E.RulesConfig(t99_fact=0.2)
+    assert not E.verdict(E.UnexplainedAccessRule().decide(E.Ctx(tl, {}, low), []), low)
+    cfg = E.RulesConfig(t99_fact=0.3)
+    assert E.verdict(E.UnexplainedAccessRule().decide(E.Ctx(tl, {}, cfg), []), cfg)
 
 
 def test_t99_unknown_cashier_presence_is_skipped():  # review minor
